@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Velvet Puzzle - Unveil the hidden beauty</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=Cormorant+Garamond:ital,wght@0,300;0,600;1,300&display=swap');
+        
+        :root {
+            --safe-top: env(safe-area-inset-top);
+            --safe-bottom: env(safe-area-inset-bottom);
+        }
+
+        body {
+            font-family: 'Cormorant Garamond', serif;
+            margin: 0;
+            overflow: hidden;
+            background-color: #050505;
+            touch-action: none;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+
+        h1 {
+            font-family: 'Playfair Display', serif;
+        }
+
+        .fade-in {
+            animation: fadeIn 1.5s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); filter: blur(10px); }
+            to { opacity: 1; transform: translateY(0); filter: blur(0); }
+        }
+
+        .shimmer {
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.05), transparent);
+            background-size: 200% 100%;
+            animation: shimmer 4s infinite linear;
+        }
+
+        @keyframes shimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+
+        .puzzle-tile {
+            transition: transform 0.2s ease-out, opacity 0.2s ease-out;
+            background-repeat: no-repeat;
+        }
+
+        .vignette-heavy {
+            box-shadow: inset 0 0 120px rgba(0,0,0,0.9);
+        }
+
+        * { -webkit-tap-highlight-color: transparent; }
+
+        .won-ui-fade {
+            animation: wonFade 0.8s forwards;
+            animation-delay: 0.5s;
+            opacity: 0;
+        }
+
+        @keyframes wonFade {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // Iconコンポーネントを修正：Reactの管理外でDOM操作を行うように変更し、クラッシュを防ぐ
+        const Icon = ({ name, size = 16, className = "" }) => {
+            const ref = useRef(null);
+
+            useEffect(() => {
+                if (window.lucide && ref.current) {
+                    // 一旦中身を空にして、新しい<i>タグを追加してからLucideに変換させる
+                    // これによりReactが管理するDOMノードが勝手に置換されるのを防ぐ
+                    const i = document.createElement('i');
+                    i.setAttribute('data-lucide', name);
+                    i.style.width = `${size}px`;
+                    i.style.height = `${size}px`;
+                    
+                    ref.current.innerHTML = '';
+                    ref.current.appendChild(i);
+                    
+                    // この要素内だけをスキャンして変換
+                    window.lucide.createIcons({
+                        root: ref.current
+                    });
+                }
+            }, [name, size]);
+
+            return <span ref={ref} className={`inline-flex items-center justify-center ${className}`} style={{ width: size, height: size }}></span>;
+        };
+
+        const App = () => {
+            const [gridSize, setGridSize] = useState(3);
+            const [imageSrc, setImageSrc] = useState(null);
+            const [tiles, setTiles] = useState([]);
+            const [gameState, setGameState] = useState('initial'); 
+            const [selectedTileIndex, setSelectedTileIndex] = useState(null);
+            const [moves, setMoves] = useState(0);
+            const [timeElapsed, setTimeElapsed] = useState(0);
+            const [showPreview, setShowPreview] = useState(false);
+            const [aspectRatio, setAspectRatio] = useState(1);
+            const [isFullscreen, setIsFullscreen] = useState(false);
+            const [hideUI, setHideUI] = useState(false);
+            
+            const timerRef = useRef(null);
+            const fileInputRef = useRef(null);
+
+            useEffect(() => {
+                if (imageSrc) {
+                    const img = new Image();
+                    img.onload = () => setAspectRatio(img.width / img.height);
+                    img.src = imageSrc;
+                }
+            }, [imageSrc]);
+
+            useEffect(() => {
+                if (gameState === 'playing') {
+                    timerRef.current = setInterval(() => {
+                        setTimeElapsed(prev => prev + 1);
+                    }, 1000);
+                } else {
+                    clearInterval(timerRef.current);
+                }
+                return () => clearInterval(timerRef.current);
+            }, [gameState]);
+
+            useEffect(() => {
+                const handleFsChange = () => setIsFullscreen(!!document.fullscreenElement);
+                document.addEventListener('fullscreenchange', handleFsChange);
+                return () => document.removeEventListener('fullscreenchange', handleFsChange);
+            }, []);
+
+            const toggleFullscreen = () => {
+                if (!document.fullscreenElement) {
+                    document.documentElement.requestFullscreen().catch(() => {});
+                } else {
+                    document.exitFullscreen();
+                }
+            };
+
+            const isSolved = useCallback((currentTiles) => {
+                if (currentTiles.length === 0) return false;
+                return currentTiles.every((val, i) => val === i);
+            }, []);
+
+            const isAdjacent = (index1, index2) => {
+                const row1 = Math.floor(index1 / gridSize);
+                const col1 = index1 % gridSize;
+                const row2 = Math.floor(index2 / gridSize);
+                const col2 = index2 % gridSize;
+                return Math.abs(row1 - row2) + Math.abs(col1 - col2) === 1;
+            };
+
+            const startNewGame = () => {
+                if (!imageSrc) {
+                    fileInputRef.current?.click();
+                    return;
+                }
+                const totalTiles = gridSize * gridSize;
+                const initialTiles = Array.from({ length: totalTiles }, (_, i) => i);
+                let shuffled;
+                
+                do {
+                    shuffled = [...initialTiles].sort(() => Math.random() - 0.5);
+                } while (isSolved(shuffled));
+
+                setTiles(shuffled);
+                setMoves(0);
+                setTimeElapsed(0);
+                setSelectedTileIndex(null);
+                setShowPreview(false);
+                setHideUI(false);
+                setGameState('playing');
+            };
+
+            const handleTileClick = (index) => {
+                if (gameState !== 'playing') return;
+
+                if (selectedTileIndex === null) {
+                    setSelectedTileIndex(index);
+                } else {
+                    if (selectedTileIndex === index) {
+                        setSelectedTileIndex(null);
+                    } else if (isAdjacent(selectedTileIndex, index)) {
+                        const newTiles = [...tiles];
+                        [newTiles[index], newTiles[selectedTileIndex]] = [newTiles[selectedTileIndex], newTiles[index]];
+                        setTiles(newTiles);
+                        setMoves(prev => prev + 1);
+                        setSelectedTileIndex(null);
+                        
+                        if (isSolved(newTiles)) {
+                            setGameState('won');
+                        }
+                    } else {
+                        setSelectedTileIndex(index);
+                    }
+                }
+            };
+
+            const handleFileUpload = (e) => {
+                const file = e.target.files?.[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                        setImageSrc(event.target.result);
+                        setGameState('initial');
+                    };
+                    reader.readAsDataURL(file);
+                }
+            };
+
+            const formatTime = (seconds) => {
+                const mins = Math.floor(seconds / 60);
+                const secs = seconds % 60;
+                return `${mins}:${secs.toString().padStart(2, '0')}`;
+            };
+
+            const goHome = () => {
+                // 安全のため、状態更新をバッチ処理から少し遅らせる
+                setTimeout(() => {
+                    setHideUI(false);
+                    setShowPreview(false);
+                    setTiles([]);
+                    setSelectedTileIndex(null);
+                    setTimeElapsed(0);
+                    setMoves(0);
+                    setImageSrc(null);
+                    setGameState('initial');
+                    
+                    if (fileInputRef.current) {
+                        fileInputRef.current.value = '';
+                    }
+                }, 10);
+            };
+
+            return (
+                <div 
+                    className="fixed inset-0 bg-[#050505] text-rose-50 flex flex-col items-center justify-center p-4 overflow-hidden"
+                    onClick={() => { if (hideUI) setHideUI(false); }}
+                >
+                    <div className="fixed inset-0 bg-[radial-gradient(circle_at_20%_20%,_#3a0a1a_0%,_transparent_40%)] opacity-30"></div>
+                    <div className="fixed inset-0 bg-[radial-gradient(circle_at_80%_80%,_#1a103a_0%,_transparent_40%)] opacity-20"></div>
+                    
+                    <header className={`transition-all duration-1000 text-center relative z-20 ${gameState !== 'initial' ? 'opacity-0 h-0 overflow-hidden' : 'mb-8 opacity-100'}`}>
+                        <h1 className="text-4xl md:text-7xl font-thin tracking-[0.4em] text-transparent bg-clip-text bg-gradient-to-b from-rose-100 via-rose-300 to-rose-100 drop-shadow-2xl">
+                            VELVET PUZZLE
+                        </h1>
+                        <p className="text-rose-400/40 text-[10px] tracking-[0.6em] uppercase mt-2 italic">A delicate touch reveals all</p>
+                    </header>
+
+                    <div className={`w-full max-w-lg flex justify-between items-center mb-4 relative z-30 px-2 transition-all duration-700 ${gameState === 'won' || hideUI ? 'opacity-0 pointer-events-none -translate-y-4' : 'opacity-100'}`}>
+                        <div className="flex gap-2">
+                            {gameState !== 'initial' && (
+                                <button onClick={goHome} className="p-3 bg-white/5 border border-white/10 rounded-full active:scale-90 transition-all backdrop-blur-md hover:bg-white/10">
+                                    <Icon name="home" size={18} className="text-rose-200" />
+                                </button>
+                            )}
+                            <button onClick={toggleFullscreen} className="p-3 bg-white/5 border border-white/10 rounded-full active:scale-90 transition-all backdrop-blur-md hover:bg-white/10">
+                                <Icon name={isFullscreen ? "minimize" : "maximize"} size={18} className="text-rose-200" />
+                            </button>
+                            <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2 bg-rose-950/40 border border-rose-500/20 text-rose-100 rounded-full active:scale-95 transition-all backdrop-blur-md hover:bg-rose-900/50">
+                                <Icon name="image" size={14} />
+                                <span className="text-[10px] tracking-[0.1em] uppercase font-bold">Image</span>
+                            </button>
+                            <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept="image/*" className="hidden" />
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                            {gameState === 'playing' && (
+                                <div className="text-rose-200/60 font-light tracking-widest text-[10px] mr-2">
+                                    {moves} moves / {formatTime(timeElapsed)}
+                                </div>
+                            )}
+                            <button 
+                                onClick={() => setShowPreview(!showPreview)} 
+                                className={`p-3 rounded-full border transition-all active:scale-90 backdrop-blur-md ${showPreview ? 'bg-amber-500/30 border-amber-500/50 text-amber-200' : 'bg-white/5 border-white/10 text-rose-300 hover:bg-white/10'}`}
+                            >
+                                <Icon name="eye" size={18} />
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className={`relative transition-all duration-1000 flex items-center justify-center ${gameState === 'initial' ? 'w-full max-w-md' : 'w-full h-full max-h-[80vh]'}`}>
+                        
+                        {gameState === 'initial' ? (
+                            <div className="flex flex-col items-center gap-10 py-6 w-full fade-in">
+                                <div className="relative group cursor-pointer" onClick={() => fileInputRef.current?.click()}>
+                                    <div className="absolute -inset-8 bg-rose-500/10 rounded-full blur-[60px] group-hover:bg-rose-500/20 transition-all"></div>
+                                    <div className="w-64 h-64 bg-neutral-900 rounded-full overflow-hidden border border-white/10 relative z-10 shadow-2xl flex items-center justify-center">
+                                        {imageSrc ? (
+                                            <img src={imageSrc} className="w-full h-full object-cover opacity-60" alt="Preview" />
+                                        ) : (
+                                            <div className="text-rose-200/20 flex flex-col items-center gap-2">
+                                                <Icon name="plus" size={32} />
+                                                <span className="text-[10px] tracking-widest uppercase">Pick an Image</span>
+                                            </div>
+                                        )}
+                                        <div className="absolute inset-0 vignette-heavy"></div>
+                                    </div>
+                                </div>
+                                
+                                <div className="flex flex-col items-center gap-4 w-full">
+                                    <p className="text-[10px] uppercase tracking-[0.5em] text-rose-400/60 font-bold">Select Complexity</p>
+                                    <div className="flex gap-3 w-full max-w-xs">
+                                        {[3, 4, 5].map(size => (
+                                            <button 
+                                                key={size} 
+                                                onClick={() => setGridSize(size)} 
+                                                className={`flex-1 py-4 rounded-2xl border transition-all duration-500 ${
+                                                    gridSize === size 
+                                                        ? 'border-rose-500 bg-rose-500/10 text-rose-100 shadow-[0_0_20px_rgba(225,29,72,0.15)]' 
+                                                        : 'border-white/5 bg-white/5 text-rose-200/30 hover:bg-white/10'
+                                                }`}
+                                            >
+                                                <span className="text-lg font-thin italic">{size}×{size}</span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <button onClick={startNewGame} className="relative group px-12 py-4 overflow-hidden rounded-full active:scale-95 shadow-2xl">
+                                    <div className="absolute inset-0 bg-gradient-to-r from-rose-800 to-rose-950"></div>
+                                    <div className="absolute inset-0 shimmer opacity-20"></div>
+                                    <span className="relative z-10 text-[10px] tracking-[0.5em] uppercase font-bold text-white">
+                                        {imageSrc ? "Begin Revelation" : "Select Image to Start"}
+                                    </span>
+                                </button>
+                            </div>
+                        ) : (
+                            <div 
+                                className={`relative transition-all duration-1000 ease-in-out ${gameState === 'won' ? 'w-full h-full' : 'w-full h-full'}`}
+                                style={{ 
+                                    aspectRatio: gameState === 'won' ? 'auto' : `${aspectRatio}`,
+                                    maxWidth: gameState === 'won' ? '100%' : `calc(85vh * ${aspectRatio})`,
+                                    maxHeight: '85vh'
+                                }}
+                            >
+                                {gameState === 'won' && !hideUI && (
+                                    <div className="absolute inset-0 z-50 flex flex-col items-center justify-center won-ui-fade px-4 pointer-events-none">
+                                        <div className="text-center p-8 backdrop-blur-2xl bg-black/50 rounded-[3rem] border border-white/10 shadow-[0_0_100px_rgba(0,0,0,0.8)] pointer-events-auto">
+                                            <Icon name="sparkles" size={32} className="mx-auto text-amber-300 mb-3" />
+                                            <h2 className="text-3xl md:text-5xl font-thin tracking-[0.4em] text-white mb-1 italic">Exquisite</h2>
+                                            <p className="text-rose-200/60 text-[9px] uppercase tracking-widest mb-8">Revealed in {moves} moves • {formatTime(timeElapsed)}</p>
+                                            
+                                            <div className="flex flex-col gap-3">
+                                                <div className="flex gap-3 justify-center">
+                                                    <button 
+                                                        onClick={goHome} 
+                                                        className="flex-1 px-8 py-3 border border-white/20 text-white rounded-full text-[10px] uppercase tracking-[0.2em] bg-black/40 hover:bg-white/10 active:scale-90 transition-all cursor-pointer"
+                                                    >
+                                                        Home
+                                                    </button>
+                                                    <button 
+                                                        onClick={startNewGame} 
+                                                        className="flex-1 px-8 py-3 bg-rose-700 text-white rounded-full text-[10px] uppercase tracking-[0.2em] shadow-2xl hover:bg-rose-600 active:scale-90 transition-all cursor-pointer"
+                                                    >
+                                                        Again
+                                                    </button>
+                                                </div>
+                                                <button 
+                                                    onClick={(e) => { e.stopPropagation(); setHideUI(true); }} 
+                                                    className="w-full px-8 py-2 border border-rose-500/30 text-rose-200 rounded-full text-[9px] uppercase tracking-[0.2em] bg-rose-950/20 hover:bg-rose-900/30 active:scale-90 transition-all cursor-pointer"
+                                                >
+                                                    View Solo Image
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                <div className={`
+                                    w-full h-full transition-all duration-1000 overflow-hidden flex items-center justify-center
+                                    ${gameState === 'won' ? 'p-0 rounded-none border-none' : 'p-1 bg-neutral-900 rounded-2xl border border-white/10'}
+                                `}>
+                                    {gameState === 'won' ? (
+                                        <img 
+                                            src={imageSrc} 
+                                            className="w-full h-full object-contain" 
+                                            style={{ maxHeight: '85vh', maxWidth: '100%' }}
+                                            alt="Completed"
+                                        />
+                                    ) : (
+                                        <>
+                                            {showPreview && (
+                                                <div className="absolute inset-1 z-10 pointer-events-none opacity-40">
+                                                    <img src={imageSrc} className="w-full h-full object-cover rounded-xl" />
+                                                </div>
+                                            )}
+                                            <div 
+                                                className="w-full h-full grid relative" 
+                                                style={{ 
+                                                    gridTemplateColumns: `repeat(${gridSize}, 1fr)`, 
+                                                    gridTemplateRows: `repeat(${gridSize}, 1fr)`,
+                                                    gap: '0' 
+                                                }}
+                                            >
+                                                {tiles.map((tileIndex, idx) => {
+                                                    const originalRow = Math.floor(tileIndex / gridSize);
+                                                    const originalCol = tileIndex % gridSize;
+                                                    const isSelected = selectedTileIndex === idx;
+                                                    
+                                                    const percentX = (originalCol / (gridSize - 1)) * 100;
+                                                    const percentY = (originalRow / (gridSize - 1)) * 100;
+
+                                                    return (
+                                                        <div 
+                                                            key={idx} 
+                                                            onClick={() => handleTileClick(idx)} 
+                                                            className={`
+                                                                relative overflow-hidden cursor-pointer puzzle-tile
+                                                                ${isSelected ? 'z-20 ring-2 ring-rose-400 brightness-125 scale-95' : 'border-[0.5px] border-black/20'}
+                                                            `}
+                                                            style={{ 
+                                                                backgroundImage: `url(${imageSrc})`, 
+                                                                backgroundPosition: `${percentX}% ${percentY}%`, 
+                                                                backgroundSize: `${gridSize * 100}% ${gridSize * 100}%`
+                                                            }}
+                                                        >
+                                                            <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent pointer-events-none"></div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    <footer className={`mt-auto pb-4 transition-opacity duration-700 ${gameState === 'initial' ? 'opacity-100' : 'opacity-0'}`}>
+                        <div className="flex flex-col items-center gap-3 text-rose-300/20 text-[9px] tracking-[0.6em] uppercase text-center">
+                            <p>Touch fragments to rearrange</p>
+                            <Icon name="heart" size={12} className="text-rose-900/40" />
+                        </div>
+                    </footer>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
