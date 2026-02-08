@@ -54,17 +54,16 @@
         .puzzle-tile {
             transition: transform 0.2s ease-out, opacity 0.2s ease-out;
             background-repeat: no-repeat;
-            /* 動画の場合のスタイル調整 */
             position: relative;
             overflow: hidden;
         }
 
-        /* Video element inside tile */
-        .tile-video {
-            position: absolute;
-            max-width: none;
+        .puzzle-canvas {
+            width: 100%;
+            height: 100%;
+            object-fit: fill;
             pointer-events: none;
-            object-fit: cover;
+            display: block; /* 余白除去 */
         }
 
         .vignette-heavy {
@@ -112,7 +111,7 @@
             const [gridSize, setGridSize] = useState(3);
             const [mediaSrc, setMediaSrc] = useState(null);
             const [mediaType, setMediaType] = useState('image'); // 'image' or 'video'
-            const [isMuted, setIsMuted] = useState(true); // Default muted for autoplay policy
+            const [isMuted, setIsMuted] = useState(true);
             
             const [tiles, setTiles] = useState([]);
             const [gameState, setGameState] = useState('initial'); 
@@ -126,8 +125,11 @@
             
             const timerRef = useRef(null);
             const fileInputRef = useRef(null);
-            // 動画の同期用（簡易的）
-            const videoRefs = useRef([]); 
+            
+            // 動画再生システム用のRef
+            const sourceVideoRef = useRef(null); // 裏で再生する単一のVideo要素
+            const canvasRefs = useRef([]);       // 各ピースの描画先Canvas
+            const animationFrameRef = useRef(null);
 
             useEffect(() => {
                 if (mediaSrc) {
@@ -136,18 +138,12 @@
                         img.onload = () => setAspectRatio(img.width / img.height);
                         img.src = mediaSrc;
                     } else {
-                        // 動画の場合はメタデータ読み込み後にアスペクト比を設定
-                        const video = document.createElement('video');
-                        video.onloadedmetadata = () => {
-                            if (video.videoWidth && video.videoHeight) {
-                                setAspectRatio(video.videoWidth / video.videoHeight);
-                            }
-                        };
-                        video.src = mediaSrc;
+                        // 動画の場合、アスペクト比はメタデータロード時に設定
+                        // 実際のvideo要素はJSX内でレンダリング
                     }
                 }
                 return () => {
-                    // Object URLのクリーンアップは新規ファイル選択時に行う
+                    // Cleanup
                 };
             }, [mediaSrc, mediaType]);
 
@@ -168,17 +164,60 @@
                 return () => document.removeEventListener('fullscreenchange', handleFsChange);
             }, []);
 
-            // 全ての動画タイルの再生状態を同期させる試み
-            useEffect(() => {
-                if (mediaType === 'video' && gameState === 'playing' && !isPausedByPreview) {
-                    videoRefs.current.forEach(v => {
-                        if(v) v.play().catch(() => {});
-                    });
-                }
-            }, [tiles, gameState, mediaType]);
+            // 動画描画ループ
+            const renderLoop = useCallback(() => {
+                if (gameState === 'playing' && mediaType === 'video' && sourceVideoRef.current) {
+                    const video = sourceVideoRef.current;
+                    
+                    // 動画が再生可能でなければスキップ
+                    if (video.readyState >= 2 && !video.paused && !video.ended) {
+                        const vW = video.videoWidth;
+                        const vH = video.videoHeight;
+                        const tileW = vW / gridSize;
+                        const tileH = vH / gridSize;
 
-            // プレビュー中は裏の動画を止めるかどうかのフラグ（今は止めない仕様）
-            const isPausedByPreview = false; 
+                        tiles.forEach((tileIndex, viewIndex) => {
+                            const canvas = canvasRefs.current[viewIndex];
+                            if (!canvas) return;
+
+                            const ctx = canvas.getContext('2d', { alpha: false }); // 高速化のためalpha無効
+                            
+                            // キャンバスサイズを動画解像度に合わせる（初回のみ設定推奨だが簡易実装としてここでチェック）
+                            // 頻繁なサイズ変更は避ける
+                            if (canvas.width !== Math.ceil(tileW)) canvas.width = Math.ceil(tileW);
+                            if (canvas.height !== Math.ceil(tileH)) canvas.height = Math.ceil(tileH);
+
+                            // タイルの本来の位置（ソース座標）
+                            const originalRow = Math.floor(tileIndex / gridSize);
+                            const originalCol = tileIndex % gridSize;
+                            const sx = originalCol * tileW;
+                            const sy = originalRow * tileH;
+
+                            // 描画
+                            ctx.drawImage(video, sx, sy, tileW, tileH, 0, 0, canvas.width, canvas.height);
+                        });
+                    }
+                }
+                animationFrameRef.current = requestAnimationFrame(renderLoop);
+            }, [gameState, mediaType, tiles, gridSize]);
+
+            // ループの開始・停止管理
+            useEffect(() => {
+                if (gameState === 'playing' && mediaType === 'video') {
+                    // 動画再生開始
+                    if (sourceVideoRef.current) {
+                        sourceVideoRef.current.play().catch(e => console.log("Auto-play prevented", e));
+                    }
+                    animationFrameRef.current = requestAnimationFrame(renderLoop);
+                } else {
+                    if (animationFrameRef.current) {
+                        cancelAnimationFrame(animationFrameRef.current);
+                    }
+                }
+                return () => {
+                    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+                };
+            }, [gameState, mediaType, renderLoop]);
 
             const toggleFullscreen = () => {
                 if (!document.fullscreenElement) {
@@ -221,8 +260,9 @@
                 setShowPreview(false);
                 setHideUI(false);
                 setGameState('playing');
-                // ゲーム開始時はミュート（ブラウザポリシー対応のため推奨）
-                // ユーザーが明示的に解除するまでそのまま
+                
+                // 動画の場合はミュートで再生開始（ユーザー操作が必要な場合があるため）
+                // 既にmute設定ならそのまま
             };
 
             const handleTileClick = (index) => {
@@ -252,7 +292,6 @@
             const handleFileUpload = (e) => {
                 const file = e.target.files?.[0];
                 if (file) {
-                    // 古いURLを解放
                     if (mediaSrc && mediaSrc.startsWith('blob:')) {
                         URL.revokeObjectURL(mediaSrc);
                     }
@@ -262,11 +301,18 @@
                     
                     if (file.type.startsWith('video/')) {
                         setMediaType('video');
-                        setIsMuted(true); // 動画読み込み時はミュート
+                        setIsMuted(true);
                     } else {
                         setMediaType('image');
                     }
                     setGameState('initial');
+                }
+            };
+
+            const handleVideoLoadedMetadata = (e) => {
+                const video = e.target;
+                if (video.videoWidth && video.videoHeight) {
+                    setAspectRatio(video.videoWidth / video.videoHeight);
                 }
             };
 
@@ -299,6 +345,21 @@
                 >
                     <div className="fixed inset-0 bg-[radial-gradient(circle_at_20%_20%,_#3a0a1a_0%,_transparent_40%)] opacity-30"></div>
                     <div className="fixed inset-0 bg-[radial-gradient(circle_at_80%_80%,_#1a103a_0%,_transparent_40%)] opacity-20"></div>
+
+                    {/* Hidden Source Video (常にレンダリングしておき、CSSで隠す) */}
+                    {mediaType === 'video' && mediaSrc && (
+                        <video 
+                            ref={sourceVideoRef}
+                            src={mediaSrc}
+                            muted={isMuted}
+                            loop
+                            playsInline
+                            onLoadedMetadata={handleVideoLoadedMetadata}
+                            className="absolute opacity-0 pointer-events-none -z-50"
+                            width="1" height="1" // リソース節約のため最小化しないほうが良い（描画ソースとして使うため）、CSSで隠す
+                            style={{ display: 'block', opacity: 0, position: 'absolute', top: -9999 }}
+                        />
+                    )}
                     
                     <header className={`transition-all duration-1000 text-center relative z-20 ${gameState !== 'initial' ? 'opacity-0 h-0 overflow-hidden' : 'mb-8 opacity-100'}`}>
                         <h1 className="text-4xl md:text-7xl font-thin tracking-[0.4em] text-transparent bg-clip-text bg-gradient-to-b from-rose-100 via-rose-300 to-rose-100 drop-shadow-2xl">
@@ -330,21 +391,29 @@
                                     {moves} moves / {formatTime(timeElapsed)}
                                 </div>
                             )}
-                            {/* ミュートボタン（動画再生中のみ表示） */}
-                            {gameState === 'playing' && mediaType === 'video' && (
+                            {/* ミュートボタン */}
+                            {mediaType === 'video' && (
                                 <button 
-                                    onClick={() => setIsMuted(!isMuted)} 
+                                    onClick={() => {
+                                        setIsMuted(!isMuted);
+                                        // initial画面でもプレビュー動画があればミュート切り替えを反映
+                                        if (gameState === 'initial') {
+                                            // refを使わずstate変更で再レンダリングさせる
+                                        }
+                                    }} 
                                     className={`p-3 rounded-full border transition-all active:scale-90 backdrop-blur-md ${!isMuted ? 'bg-rose-500/30 border-rose-500/50 text-rose-100' : 'bg-white/5 border-white/10 text-rose-300 hover:bg-white/10'}`}
                                 >
                                     <Icon name={isMuted ? "volume-x" : "volume-2"} size={18} />
                                 </button>
                             )}
-                            <button 
-                                onClick={() => setShowPreview(!showPreview)} 
-                                className={`p-3 rounded-full border transition-all active:scale-90 backdrop-blur-md ${showPreview ? 'bg-amber-500/30 border-amber-500/50 text-amber-200' : 'bg-white/5 border-white/10 text-rose-300 hover:bg-white/10'}`}
-                            >
-                                <Icon name="eye" size={18} />
-                            </button>
+                            {gameState !== 'initial' && (
+                                <button 
+                                    onClick={() => setShowPreview(!showPreview)} 
+                                    className={`p-3 rounded-full border transition-all active:scale-90 backdrop-blur-md ${showPreview ? 'bg-amber-500/30 border-amber-500/50 text-amber-200' : 'bg-white/5 border-white/10 text-rose-300 hover:bg-white/10'}`}
+                                >
+                                    <Icon name="eye" size={18} />
+                                </button>
+                            )}
                         </div>
                     </div>
 
@@ -353,13 +422,21 @@
                         {gameState === 'initial' ? (
                             <div className="flex flex-col items-center gap-10 py-6 w-full fade-in">
                                 <div className="relative group cursor-pointer" onClick={() => fileInputRef.current?.click()}>
-                                    <div className="absolute -inset-8 bg-rose-500/10 rounded-full blur-[60px] group-hover:bg-rose-500/20 transition-all"></div>
-                                    <div className="w-64 h-64 bg-neutral-900 rounded-full overflow-hidden border border-white/10 relative z-10 shadow-2xl flex items-center justify-center">
+                                    {/* 形状変更：rounded-3xl */}
+                                    <div className="absolute -inset-8 bg-rose-500/10 rounded-[3rem] blur-[60px] group-hover:bg-rose-500/20 transition-all"></div>
+                                    <div className="w-80 h-64 bg-neutral-900 rounded-[2rem] overflow-hidden border border-white/10 relative z-10 shadow-2xl flex items-center justify-center">
                                         {mediaSrc ? (
                                             mediaType === 'video' ? (
-                                                <video src={mediaSrc} autoPlay muted loop playsInline className="w-full h-full object-cover opacity-60" />
+                                                <video 
+                                                    src={mediaSrc} 
+                                                    autoPlay 
+                                                    muted={isMuted} 
+                                                    loop 
+                                                    playsInline 
+                                                    className="w-full h-full object-cover opacity-80" 
+                                                />
                                             ) : (
-                                                <img src={mediaSrc} className="w-full h-full object-cover opacity-60" alt="Preview" />
+                                                <img src={mediaSrc} className="w-full h-full object-cover opacity-80" alt="Preview" />
                                             )
                                         ) : (
                                             <div className="text-rose-200/20 flex flex-col items-center gap-2">
@@ -454,7 +531,7 @@
                                                 playsInline 
                                                 className="w-full h-full object-contain"
                                                 style={{ maxHeight: '85vh', maxWidth: '100%' }}
-                                                controls={false} // UI操作のみ
+                                                controls={false}
                                                 onClick={() => setHideUI(!hideUI)}
                                             />
                                         ) : (
@@ -508,20 +585,9 @@
                                                             } : {}}
                                                         >
                                                             {mediaType === 'video' && (
-                                                                <video
-                                                                    ref={el => videoRefs.current[idx] = el}
-                                                                    src={mediaSrc}
-                                                                    autoPlay
-                                                                    muted={isMuted}
-                                                                    loop
-                                                                    playsInline
-                                                                    className="tile-video"
-                                                                    style={{
-                                                                        width: `${gridSize * 100}%`,
-                                                                        height: `${gridSize * 100}%`,
-                                                                        left: `-${originalCol * 100}%`,
-                                                                        top: `-${originalRow * 100}%`
-                                                                    }}
+                                                                <canvas 
+                                                                    ref={el => canvasRefs.current[idx] = el}
+                                                                    className="puzzle-canvas"
                                                                 />
                                                             )}
                                                             <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent pointer-events-none"></div>
