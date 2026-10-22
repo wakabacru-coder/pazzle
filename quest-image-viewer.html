@@ -41,8 +41,7 @@ b{color:var(--text)}
   <div class="row"><button id="relayout">並べ直す</button><button id="clear">すべて削除</button></div>
   <p><b>コントローラー操作（没入中）</b></p>
   <ul>
-    <li><b>トリガー長押し</b>：掴んで直感的に移動・変形</li>
-    <li><b>ヘリ（パネル型ハンドル）</b>：立体的なレバーパネルを掴んで軽快に回転</li>
+    <li><b>トリガー長押し</b>：掴んで移動・変形（ヘリは高速回転せず安定動作）</li>
     <li><b>A / X ボタン</b>：プリセットメニュー開閉（ダブルクリックで一括アニメ再生）</li>
     <li><b>B / Y ボタン</b>：メインメニュー開閉</li>
     <li><b>中指トリガー</b>：単一画像のアニメーションON/OFF</li>
@@ -76,22 +75,17 @@ varying vec2 vUv;
 void main(){
   vec4 texColor = texture2D(map, vUv);
   vec3 color = texColor.rgb;
-
-  // 1. 輝度とグラデーション計算
   float lum = dot(color, vec3(0.299, 0.587, 0.114));
 
-  // 2. 多層カラー演算（トーンカーブ調整、彩度・明るさ連動）
   vec3 pinkShade = vec3(
     pow(color.r, 0.82) * 1.25 + 0.08 * filterIntensity,
     pow(color.g, 1.12) * 0.78,
     pow(color.b, 0.95) * 1.10 + 0.12 * filterIntensity
   );
 
-  // 3. ハイライトとシャドウの色ブレンド
   vec3 highlightPink = mix(pinkShade, vec3(1.0, 0.35, 0.68), (1.0 - lum) * 0.4);
   vec3 shadowMagenta  = mix(highlightPink, vec3(0.4, 0.05, 0.25), pow(1.0 - lum, 2.0) * 0.5);
 
-  // 4. コントラストとソフトVignette調の奥行き
   vec3 blended = mix(color, clamp(shadowMagenta, 0.0, 1.0), filterIntensity);
   gl_FragColor = vec4(blended, texColor.a);
 }`;
@@ -116,7 +110,7 @@ void main(){
   gl_FragColor = texture2D(map, uv);
 }`;
 
-// ---- パネル（キャンバスUI：フリーズ防止最適化） ----
+// ---- パネル（キャンバスUI） ----
 function rr(c,x,y,w,h,r){c.beginPath();c.moveTo(x+r,y);c.arcTo(x+w,y,x+w,y+h,r);c.arcTo(x+w,y+h,x,y+h,r);c.arcTo(x,y+h,x,y,r);c.closePath();}
 function makePanel(wm,hm,controls){
   const S=600, W=Math.round(wm*S), H=Math.round(hm*S);
@@ -157,7 +151,23 @@ function applySlider(p,c,uv){
   c.set(v); p.dirty=true;
 }
 
-// ---- ヘリ・カド（ヘリを立体オブジェクトパネルに変更） ----
+// ---- 安全なカメラ位置・向き取得関数（フリーズ防止） ----
+const v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
+function getCameraPositionAndDirection(posOut, dirOut){
+  if(renderer.xr.isPresenting){
+    const xc = renderer.xr.getCamera(camera);
+    xc.getWorldPosition(posOut);
+    xc.getWorldDirection(dirOut);
+  } else {
+    camera.getWorldPosition(posOut);
+    camera.getWorldDirection(dirOut);
+  }
+  dirOut.y = 0;
+  if(dirOut.lengthSq() < 1e-4) dirOut.set(0,0,-1);
+  dirOut.normalize();
+}
+
+// ---- ヘリ・カドハンドル ----
 const MAT_HANDLE_DEFAULT = new THREE.MeshBasicMaterial({color: 0x778899, transparent: true, opacity: 0.55, side: THREE.DoubleSide});
 const MAT_HANDLE_HOVER   = new THREE.MeshBasicMaterial({color: 0xffffff, transparent: true, opacity: 0.85, side: THREE.DoubleSide});
 const MAT_HANDLE_ACTIVE  = new THREE.MeshBasicMaterial({color: 0xff4d8d, transparent: true, opacity: 0.95, side: THREE.DoubleSide});
@@ -170,7 +180,6 @@ function makeHandles(it){
   const w = it.w, h = it.h;
   const margin = 0.03;
 
-  // 4辺のヘリを立体的な「レバーパネル（BoxGeometry）」に変更
   const heliDefs = [
     {name: 'left',   pos: [-w/2 - margin, 0, 0],            size: [0.025, h * 0.4, 0.015]},
     {name: 'right',  pos: [ w/2 + margin, 0, 0],            size: [0.025, h * 0.4, 0.015]},
@@ -372,7 +381,7 @@ function togglePresetAnimation(){
   }
 }
 
-// ---- 編集パネル（フリーズ対策最適化） ----
+// ---- 編集パネル ----
 const snapSld=(y,label,get,set)=>({t:'sld',x:20,y,w:440,h:65,label,snap:true,get,set});
 const ep=makePanel(.85,.68,[
   snapSld(20,'ピンク官能フィルター',()=>editItem?editItem.u.filterIntensity.value:0,v=>{if(editItem)editItem.u.filterIntensity.value=v;}),
@@ -406,10 +415,12 @@ presetMenu.group.visible = false; scene.add(presetMenu.group);
 
 function togglePresetMenu(){
   const pm = presetMenu.group; pm.visible = !pm.visible; if(!pm.visible) return;
-  const xc = renderer.xr.getCamera(camera); xc.getWorldPosition(v1); xc.getWorldDirection(v2); v2.y = 0;
-  if(v2.lengthSq()<1e-4) v2.set(0,0,-1); v2.normalize();
-  scene.attach(pm); pm.scale.set(1,1,1); pm.position.copy(v1).addScaledVector(v2,1.1); pm.position.y = v1.y;
-  pm.lookAt(v1.x, pm.position.y, v1.z); presetMenu.dirty = true;
+  getCameraPositionAndDirection(v1, v2);
+  scene.attach(pm); pm.scale.set(1,1,1);
+  pm.position.copy(v1).addScaledVector(v2, 1.1);
+  pm.position.y = v1.y;
+  pm.lookAt(v1.x, pm.position.y, v1.z);
+  presetMenu.dirty = true;
 }
 
 // ---- 背景 ----
@@ -485,12 +496,15 @@ const menu=makePanel(.9,.8,[
   {t:'txt',x:20,y:420,w:500,h:40,label:()=>'背景: '+(bgName||'未選択')+(mode==='ar'?'（パススルー中は非表示）':''),size:22}
 ]);
 menu.group.visible=false; scene.add(menu.group);
+
 function toggleMenu(){
   const m=menu.group; m.visible=!m.visible; if(!m.visible) return;
-  const xc=renderer.xr.getCamera(camera); xc.getWorldPosition(v1); xc.getWorldDirection(v2); v2.y=0;
-  if(v2.lengthSq()<1e-4) v2.set(0,0,-1); v2.normalize();
-  scene.attach(m); m.scale.set(1,1,1); m.position.copy(v1).addScaledVector(v2,1.1); m.position.y=v1.y-.1;
-  m.lookAt(v1.x,m.position.y,v1.z); menu.dirty=true;
+  getCameraPositionAndDirection(v1, v2);
+  scene.attach(m); m.scale.set(1,1,1);
+  m.position.copy(v1).addScaledVector(v2, 1.1);
+  m.position.y = v1.y - .1;
+  m.lookAt(v1.x, m.position.y, v1.z);
+  menu.dirty = true;
 }
 
 // ---- コントローラー制御 ----
@@ -670,17 +684,24 @@ function update(dt){
         updateHandleVisibility(it, u.handleObj);
 
       }else if(u.grabType === 'heli'){
-        // ヘリ（パネル型レバー）操作
+        // ヘリ操作：変位量を厳格にクランプして高速回転（暴走）を根本防止
         const side = u.handleObj.userData.side;
         const h = castFrom(c, [it.mesh]);
         let currentRayPos = new THREE.Vector3();
-        if(h) currentRayPos.copy(h.point); else currentRayPos.copy(c.position);
+        if(h){
+          currentRayPos.copy(h.point);
+        } else {
+          currentRayPos.copy(u.grabRayIntersection);
+        }
 
         const rayDelta = currentRayPos.clone().sub(u.grabRayIntersection);
         u.grabRayIntersection.copy(currentRayPos);
 
-        const deltaRot = (rayDelta.x + rayDelta.y) * 4.0 + sy * dt * 2;
-        if(Math.abs(deltaRot) > 0.0001){
+        // 変化量の上限を設けて爆発的回転を絶対防止
+        rayDelta.clampScalar(-0.08, 0.08);
+
+        const deltaRot = (rayDelta.x + rayDelta.y) * 1.5;
+        if(Math.abs(deltaRot) > 0.00001){
           if(side === 'top' || side === 'bottom'){
             g.rotation.x += deltaRot;
           } else if(side === 'left' || side === 'right'){
@@ -715,15 +736,11 @@ function update(dt){
           it.animating = !it.animating;
           if(it.animating){
             it.basePos.copy(it.group.position);
-            const headCam = renderer.xr.getCamera(camera);
-            const rawDir = new THREE.Vector3();
-            headCam.getWorldDirection(rawDir);
-            
-            const yaw = Math.atan2(rawDir.x, rawDir.z);
+            getCameraPositionAndDirection(v1, v2);
+            const yaw = Math.atan2(v2.x, v2.z);
             const snappedYaw = Math.round(yaw / (PI / 2)) * (PI / 2);
             it.animDir.set(Math.sin(snappedYaw), 0, Math.cos(snappedYaw)).normalize();
             it.animDir.negate();
-            
             it.animTime = 0;
           } else {
             it.group.position.copy(it.basePos);
@@ -760,8 +777,11 @@ function update(dt){
       u.prev[4] = dn4;
 
       // B / Y ボタン（ボタン5）：メインメニュー開閉
-      if(dn(5)&&!u.prev[5]&&renderer.xr.isPresenting) toggleMenu();
-      u.prev[5]=dn(5);
+      const dn5 = dn(5);
+      if(dn5 && !u.prev[5]){
+        if(renderer.xr.isPresenting) toggleMenu();
+      }
+      u.prev[5] = dn5;
     }
   });
 
