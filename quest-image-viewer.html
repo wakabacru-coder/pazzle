@@ -41,11 +41,11 @@ b{color:var(--text)}
   <div class="row"><button id="relayout">並べ直す</button><button id="clear">すべて削除</button></div>
   <p><b>コントローラー操作（没入中）</b></p>
   <ul>
-    <li><b>トリガー長押し</b>：ダイレクトに掴んで移動（カド・ヘリはカーソル先端で操作）</li>
-    <li><b>A / X ボタン（単押し）</b>：プリセットメニュー表示</li>
-    <li><b>A / X ボタン（ダブルクリック）</b>：プリセットに応じた一括アニメーション発動</li>
-    <li><b>中指トリガー（グリップ）</b>：単一画像のアニメーションON/OFF</li>
-    <li><b>B / Y ボタン</b>：メインメニュー表示／非表示</li>
+    <li><b>トリガー長押し</b>：掴んで直感的に移動・変形</li>
+    <li><b>ヘリ（パネル型ハンドル）</b>：立体的なレバーパネルを掴んで軽快に回転</li>
+    <li><b>A / X ボタン</b>：プリセットメニュー開閉（ダブルクリックで一括アニメ再生）</li>
+    <li><b>B / Y ボタン</b>：メインメニュー開閉</li>
+    <li><b>中指トリガー</b>：単一画像のアニメーションON/OFF</li>
   </ul>
 </div>
 
@@ -66,7 +66,7 @@ renderer.xr.setReferenceSpaceType('local-floor');
 document.body.prepend(renderer.domElement);
 const grid = new THREE.GridHelper(12,24,0x30363d,0x1c2128); scene.add(grid);
 
-// ---- ピンクがかったフィルターシェーダー (Pink Sensual Filter Shader) ----
+// ---- 高度な多層ピンク官能フィルターシェーダー ----
 const VS = 'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}';
 const FS = `
 uniform sampler2D map;
@@ -75,21 +75,25 @@ varying vec2 vUv;
 
 void main(){
   vec4 texColor = texture2D(map, vUv);
-  vec3 rgb = texColor.rgb;
+  vec3 color = texColor.rgb;
 
-  // ピンク〜ローズ系のトーンを協調したカラーシフト
-  float lum = dot(rgb, vec3(0.299, 0.587, 0.114));
-  vec3 pinkTint = vec3(
-    rgb.r * 1.15 + 0.12,
-    rgb.g * 0.85 + 0.03,
-    rgb.b * 1.05 + 0.10
+  // 1. 輝度とグラデーション計算
+  float lum = dot(color, vec3(0.299, 0.587, 0.114));
+
+  // 2. 多層カラー演算（トーンカーブ調整、彩度・明るさ連動）
+  vec3 pinkShade = vec3(
+    pow(color.r, 0.82) * 1.25 + 0.08 * filterIntensity,
+    pow(color.g, 1.12) * 0.78,
+    pow(color.b, 0.95) * 1.10 + 0.12 * filterIntensity
   );
-  
-  // ハイライトとシャドウに鮮やかなピンク／マゼンタのトーンを付加
-  pinkTint = mix(pinkTint, vec3(1.0, 0.45, 0.72), (1.0 - lum) * 0.25);
 
-  vec3 finalColor = mix(rgb, clamp(pinkTint, 0.0, 1.0), filterIntensity);
-  gl_FragColor = vec4(finalColor, texColor.a);
+  // 3. ハイライトとシャドウの色ブレンド
+  vec3 highlightPink = mix(pinkShade, vec3(1.0, 0.35, 0.68), (1.0 - lum) * 0.4);
+  vec3 shadowMagenta  = mix(highlightPink, vec3(0.4, 0.05, 0.25), pow(1.0 - lum, 2.0) * 0.5);
+
+  // 4. コントラストとソフトVignette調の奥行き
+  vec3 blended = mix(color, clamp(shadowMagenta, 0.0, 1.0), filterIntensity);
+  gl_FragColor = vec4(blended, texColor.a);
 }`;
 
 // ---- SBS 180°背景シェーダー ----
@@ -112,7 +116,7 @@ void main(){
   gl_FragColor = texture2D(map, uv);
 }`;
 
-// ---- パネル（キャンバスUI） ----
+// ---- パネル（キャンバスUI：フリーズ防止最適化） ----
 function rr(c,x,y,w,h,r){c.beginPath();c.moveTo(x+r,y);c.arcTo(x+w,y,x+w,y+h,r);c.arcTo(x+w,y+h,x,y+h,r);c.arcTo(x,y+h,x,y,r);c.closePath();}
 function makePanel(wm,hm,controls){
   const S=600, W=Math.round(wm*S), H=Math.round(hm*S);
@@ -120,7 +124,8 @@ function makePanel(wm,hm,controls){
   const ctx=cv.getContext('2d'), tex=new THREE.CanvasTexture(cv);
   const mesh=new THREE.Mesh(new THREE.PlaneGeometry(wm,hm), new THREE.MeshBasicMaterial({map:tex,transparent:true}));
   const group=new THREE.Group(); group.add(mesh);
-  const p={group,mesh,controls,W,H,wm,hm,owner:null,dirty:true,acc:0,draw(){
+  const p={group,mesh,controls,W,H,wm,hm,owner:null,dirty:true,draw(){
+    if(!p.dirty) return;
     ctx.clearRect(0,0,W,H); ctx.fillStyle='rgba(22,27,34,.96)'; rr(ctx,0,0,W,H,24); ctx.fill();
     ctx.textBaseline='middle';
     for(const c of controls){
@@ -152,10 +157,10 @@ function applySlider(p,c,uv){
   c.set(v); p.dirty=true;
 }
 
-// ---- ヘリ・カドハンドル ----
-const MAT_HANDLE_DEFAULT = new THREE.MeshBasicMaterial({color: 0x888888, transparent: true, opacity: 0.4, side: THREE.DoubleSide});
-const MAT_HANDLE_HOVER   = new THREE.MeshBasicMaterial({color: 0xffffff, transparent: true, opacity: 0.8, side: THREE.DoubleSide});
-const MAT_HANDLE_ACTIVE  = new THREE.MeshBasicMaterial({color: 0xffffff, transparent: true, opacity: 0.9, side: THREE.DoubleSide});
+// ---- ヘリ・カド（ヘリを立体オブジェクトパネルに変更） ----
+const MAT_HANDLE_DEFAULT = new THREE.MeshBasicMaterial({color: 0x778899, transparent: true, opacity: 0.55, side: THREE.DoubleSide});
+const MAT_HANDLE_HOVER   = new THREE.MeshBasicMaterial({color: 0xffffff, transparent: true, opacity: 0.85, side: THREE.DoubleSide});
+const MAT_HANDLE_ACTIVE  = new THREE.MeshBasicMaterial({color: 0xff4d8d, transparent: true, opacity: 0.95, side: THREE.DoubleSide});
 
 const OPPOSITE_CORNER = { 'bl': 'tr', 'br': 'tl', 'tr': 'bl', 'tl': 'br' };
 
@@ -163,31 +168,32 @@ function makeHandles(it){
   if(it.handlesGroup) it.group.remove(it.handlesGroup);
   const hGroup = new THREE.Group();
   const w = it.w, h = it.h;
-  const margin = 0.025;
+  const margin = 0.03;
 
+  // 4辺のヘリを立体的な「レバーパネル（BoxGeometry）」に変更
   const heliDefs = [
-    {name: 'left',   pos: [-w/2 - margin, 0],            size: [0.015, h * 0.3]},
-    {name: 'right',  pos: [ w/2 + margin, 0],            size: [0.015, h * 0.3]},
-    {name: 'bottom', pos: [0, -h/2 - margin],            size: [w * 0.3, 0.015]},
-    {name: 'top',    pos: [0,  h/2 + margin],            size: [w * 0.3, 0.015]}
+    {name: 'left',   pos: [-w/2 - margin, 0, 0],            size: [0.025, h * 0.4, 0.015]},
+    {name: 'right',  pos: [ w/2 + margin, 0, 0],            size: [0.025, h * 0.4, 0.015]},
+    {name: 'bottom', pos: [0, -h/2 - margin, 0],            size: [w * 0.4, 0.025, 0.015]},
+    {name: 'top',    pos: [0,  h/2 + margin, 0],            size: [w * 0.4, 0.025, 0.015]}
   ];
   const allHandles = [];
   heliDefs.forEach(d => {
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(d.size[0], d.size[1]), MAT_HANDLE_DEFAULT.clone());
-    m.position.set(d.pos[0], d.pos[1], 0.001);
+    const m = new THREE.Mesh(new THREE.BoxGeometry(d.size[0], d.size[1], d.size[2]), MAT_HANDLE_DEFAULT.clone());
+    m.position.set(d.pos[0], d.pos[1], d.pos[2]);
     m.userData = {item: it, type: 'heli', side: d.name};
     hGroup.add(m); allHandles.push(m);
   });
 
   const cornerDefs = [
-    {name: 'bl', pos: [-w/2 - margin, -h/2 - margin]},
-    {name: 'br', pos: [ w/2 + margin, -h/2 - margin]},
-    {name: 'tr', pos: [ w/2 + margin,  h/2 + margin]},
-    {name: 'tl', pos: [-w/2 - margin,  h/2 + margin]}
+    {name: 'bl', pos: [-w/2 - margin, -h/2 - margin, 0]},
+    {name: 'br', pos: [ w/2 + margin, -h/2 - margin, 0]},
+    {name: 'tr', pos: [ w/2 + margin,  h/2 + margin, 0]},
+    {name: 'tl', pos: [-w/2 - margin,  h/2 + margin, 0]}
   ];
   cornerDefs.forEach(d => {
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(0.035, 0.035), MAT_HANDLE_DEFAULT.clone());
-    m.position.set(d.pos[0], d.pos[1], 0.002);
+    const m = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.04, 0.015), MAT_HANDLE_DEFAULT.clone());
+    m.position.set(d.pos[0], d.pos[1], d.pos[2]);
     m.userData = {item: it, type: 'corner', corner: d.name};
     hGroup.add(m); allHandles.push(m);
   });
@@ -215,7 +221,7 @@ function updateHandleVisibility(it, activeHandleObj = null){
 }
 
 function getCornerLocalPos(cornerName, w, h){
-  const margin = 0.025;
+  const margin = 0.03;
   const sx = (cornerName === 'tr' || cornerName === 'br') ? 1 : -1;
   const sy = (cornerName === 'tr' || cornerName === 'tl') ? 1 : -1;
   return new THREE.Vector3(sx * (w/2 + margin), sy * (h/2 + margin), 0);
@@ -239,8 +245,8 @@ function makeItem(tex,w,h,video){
 
   const it={
     group, mesh, tex, mat, u:mat.uniforms, w, h, video:video||null, vp:null,
-    animating: false, animTime: 0, animDepth: 2.0, animSpeedIdx: 1, // 初期アニメ奥行き2m
-    orbitAnimating: false, orbitAngle: 0, orbitRadius: 2.5, // 円形旋回アニメ用
+    animating: false, animTime: 0, animDepth: 2.0, animSpeedIdx: 1,
+    orbitAnimating: false, orbitAngle: 0, orbitRadius: 2.5,
     basePos: new THREE.Vector3(),
     animDir: new THREE.Vector3(0,0,-1)
   };
@@ -305,8 +311,8 @@ function layout(){
 }
 function updateCount(){ $('count').textContent=items.length; }
 
-// ---- プリセット配置ロジック（Aボタン連動） ----
-let currentPresetMode = 'none'; // 'depth' または 'circle'
+// ---- プリセット配置 ----
+let currentPresetMode = 'none';
 let isAllDepthAnimating = false;
 let isAllCircleAnimating = false;
 
@@ -366,19 +372,15 @@ function togglePresetAnimation(){
   }
 }
 
-// ---- 編集パネル（奥行き限界 10.0m） ----
+// ---- 編集パネル（フリーズ対策最適化） ----
 const snapSld=(y,label,get,set)=>({t:'sld',x:20,y,w:440,h:65,label,snap:true,get,set});
 const ep=makePanel(.85,.68,[
-  snapSld(20,'ピンクフィルター',()=>editItem?editItem.u.filterIntensity.value:0,v=>{if(editItem)editItem.u.filterIntensity.value=v;}),
-
-  // 10m 上限（0 ~ 10.0m）
+  snapSld(20,'ピンク官能フィルター',()=>editItem?editItem.u.filterIntensity.value:0,v=>{if(editItem)editItem.u.filterIntensity.value=v;}),
   {t:'sld',x:20,y:110,w:280,h:60,label:()=>'アニメ奥行き: '+(editItem?(editItem.animDepth).toFixed(1)+'m':''),get:()=>editItem?editItem.animDepth/10.0:0.2,set:v=>{if(editItem)editItem.animDepth=v*10.0;}},
-
   {t:'btn',x:315,y:110,w:145,h:55,label:()=>'速度: '+(editItem?speedOptions[editItem.animSpeedIdx]:1)+'x',act:()=>{
     if(!editItem) return;
     editItem.animSpeedIdx = (editItem.animSpeedIdx + 1) % speedOptions.length;
   }},
-
   {t:'btn',x:20,y:195,w:440,h:55,label:'フィルターリセット',act:()=>{
     if(!editItem)return;
     editItem.u.filterIntensity.value = 0;
@@ -394,7 +396,7 @@ function enterEdit(it){
 }
 function exitEdit(){ if(editItem) editItem.group.remove(ep.group); editItem=null; }
 
-// ---- プリセットメニュー（Aボタン操作で表示） ----
+// ---- プリセットメニュー ----
 const presetMenu = makePanel(.8,.4,[
   {t:'txt',x:20,y:10,w:400,h:35,label:'配置プリセット (Aダブルクリックで再生)',size:22},
   {t:'btn',x:20,y:60,w:440,h:65,label:'1. 奥行き手前〜奥へ整列',act:()=>{ applyPreset1_Depth(); presetMenu.group.visible = false; }},
@@ -410,7 +412,7 @@ function togglePresetMenu(){
   pm.lookAt(v1.x, pm.position.y, v1.z); presetMenu.dirty = true;
 }
 
-// ---- 背景（360°/180° SBS対応） ----
+// ---- 背景 ----
 let bgMode='none', bgTex=null, bgVideo=null, bgName='';
 const bgMat = new THREE.ShaderMaterial({
   uniforms: { map: { value: null }, isStereo180: { value: 0.0 } },
@@ -468,7 +470,7 @@ async function startXR(m){
 }
 function endXR(msg){ if(msg) $('status').textContent='画像・動画を選択してください'; pending=null; session&&session.end(); }
 
-// ---- メニュー ----
+// ---- メインメニュー ----
 const bgBtn=(x,m,l)=>({t:'btn',x,y:262,w:160,h:64,label:l,on:()=>bgMode===m,act:()=>setBgMode(m)});
 const menu=makePanel(.9,.8,[
   {t:'txt',x:20,y:12,w:300,h:40,label:'メニュー',size:30},
@@ -491,10 +493,10 @@ function toggleMenu(){
   m.lookAt(v1.x,m.position.y,v1.z); menu.dirty=true;
 }
 
-// ---- コントローラー & カーソル先端追従処理 ----
+// ---- コントローラー制御 ----
 const controllers=[], ray=new THREE.Raycaster(), tm=new THREE.Matrix4(), wp=new THREE.Vector3();
 let lastClick={item:null,t:0};
-let lastABtnTime = 0; // Aボタンダブルクリック検知用
+let lastABtnTime = 0;
 const lineGeo=new THREE.CylinderGeometry(.004,.004,1,6); lineGeo.rotateX(PI/2); lineGeo.translate(0,0,-.5);
 
 for(let i=0;i<2;i++){
@@ -505,7 +507,6 @@ for(let i=0;i<2;i++){
   c.userData={
     hit:null, grab:null, grabType:null, handleObj:null, drag:null, line, src:null, prev:[], t0:0,
     p0:new THREE.Vector3(),
-    // カーソル先端（レイ交差点）に基づく操作用パラメータ
     grabRayIntersection: new THREE.Vector3(),
     initialW: 0.7, initialH: 0.7, initialRayDist: 1.0,
     oppositeWorldPos: new THREE.Vector3(),
@@ -533,7 +534,7 @@ for(let i=0;i<2;i++){
       u.grab = it;
       u.grabType = handleType;
       u.handleObj = h.object;
-      u.grabRayIntersection.copy(h.point); // レイ交差点（カーソル先端位置）を記憶
+      u.grabRayIntersection.copy(h.point);
       updateHandleVisibility(it, h.object);
 
       if(handleType === 'corner'){
@@ -598,9 +599,6 @@ function castFrom(c,objs){
   return ray.intersectObjects(objs,false)[0]||null;
 }
 const dz=v=>Math.abs(v)<.15?0:v;
-function drawIf(p,dt,live){
-  p.acc+=dt; if(p.dirty||(live&&p.acc>.15)){p.draw();p.acc=0;}
-}
 
 function update(dt){
   const picks=[];
@@ -637,13 +635,11 @@ function update(dt){
           g.scale.setScalar(newScale);
         }
       }else if(u.grabType === 'corner'){
-        // カーソル先端（レイ交差点）に完全追従した対角固定リサイズ
         const h = castFrom(c, [it.mesh]);
         let currentRayPos = new THREE.Vector3();
         if(h){
           currentRayPos.copy(h.point);
         } else {
-          // レイが外れた場合は平面へのプロジェクション
           const plane = new THREE.Plane(new THREE.Vector3(0,0,1).applyQuaternion(g.quaternion), -g.position.dot(new THREE.Vector3(0,0,1).applyQuaternion(g.quaternion)));
           ray.ray.intersectPlane(plane, currentRayPos);
         }
@@ -662,7 +658,7 @@ function update(dt){
 
         const signX = (grabbedCorner === 'tr' || grabbedCorner === 'br') ? 1 : -1;
         const signY = (grabbedCorner === 'tr' || grabbedCorner === 'tl') ? 1 : -1;
-        const margin = 0.025;
+        const margin = 0.03;
         const localOppOffset = new THREE.Vector3(-signX * (newW/2 + margin), -signY * (newH/2 + margin), 0);
         const worldOppOffset = localOppOffset.applyQuaternion(g.quaternion);
 
@@ -674,7 +670,7 @@ function update(dt){
         updateHandleVisibility(it, u.handleObj);
 
       }else if(u.grabType === 'heli'){
-        // カーソル先端の移動に追従した回転
+        // ヘリ（パネル型レバー）操作
         const side = u.handleObj.userData.side;
         const h = castFrom(c, [it.mesh]);
         let currentRayPos = new THREE.Vector3();
@@ -711,7 +707,7 @@ function update(dt){
     if(gp){
       const dn=i=>!!(gp.buttons[i]&&gp.buttons[i].pressed);
 
-      // 中指トリガー（グリップボタン）で単一アニメーションON/OFF
+      // 中指トリガー（グリップボタン）でアニメーションON/OFF
       const dn1 = dn(1);
       if(dn1 && !u.prev[1] && u.hit){
         const it = u.hit.object.userData.item;
@@ -749,29 +745,27 @@ function update(dt){
       }
       u.prev[3] = dn3;
 
-      // A / X ボタン（ボタン4）：単押しでプリセットメニュー表示／ダブルクリックで一括再生
+      // A / X ボタン（ボタン4）：単押しでプリセットメニュー開閉／ダブルクリックで再生
       const dn4 = dn(4);
       if(dn4 && !u.prev[4]){
         const now = performance.now();
         if(now - lastABtnTime < 400){
-          // ダブルクリック：プリセットアニメーション一括再生
           togglePresetAnimation();
           lastABtnTime = 0;
         } else {
-          // 単押し：プリセットメニュー表示/非表示
           if(renderer.xr.isPresenting) togglePresetMenu();
           lastABtnTime = now;
         }
       }
       u.prev[4] = dn4;
 
-      // B / Y ボタン（ボタン5）でメインメニュー表示/非表示
+      // B / Y ボタン（ボタン5）：メインメニュー開閉
       if(dn(5)&&!u.prev[5]&&renderer.xr.isPresenting) toggleMenu();
       u.prev[5]=dn(5);
     }
   });
 
-  // 全アニメーション処理更新
+  // アニメーション計算
   items.forEach(i=>{
     if(i.animating){
       const spd = speedOptions[i.animSpeedIdx];
@@ -785,12 +779,12 @@ function update(dt){
       i.group.position.set(R * Math.sin(i.orbitAngle), 1.5, -R * Math.cos(i.orbitAngle));
       i.group.lookAt(0, 1.5, 0);
     }
-    if(i.vp) drawIf(i.vp,dt,!i.video.paused);
+    if(i.vp) if(i.vp.dirty) i.vp.draw();
   });
 
-  if(menu.group.visible) drawIf(menu,dt);
-  if(presetMenu.group.visible) drawIf(presetMenu,dt);
-  if(editItem) drawIf(ep,dt);
+  if(menu.group.visible && menu.dirty) menu.draw();
+  if(presetMenu.group.visible && presetMenu.dirty) presetMenu.draw();
+  if(editItem && ep.dirty) ep.draw();
 }
 
 const clock=new THREE.Clock();
