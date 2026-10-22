@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Quest2 WebXR Local Image Viewer</title>
+    <style>
+        body { margin: 0; background: #000; color: #fff; font-family: sans-serif; overflow: hidden; }
+        #overlay {
+            position: absolute; top: 20px; left: 20px; z-index: 10;
+            background: rgba(0,0,0,0.8); padding: 20px; border-radius: 10px;
+            max-width: 300px;
+        }
+        input[type="file"] { margin-bottom: 15px; color: #fff; }
+        button { padding: 10px 20px; font-size: 16px; cursor: pointer; background: #3b82f6; color: white; border: none; border-radius: 5px; }
+        button:hover { background: #2563eb; }
+    </style>
+</head>
+<body>
+    <div id="overlay">
+        <h2>WebXR Image Viewer</h2>
+        <p style="font-size: 14px; color: #cbd5e1;">画像をアップロードしてください</p>
+        <input type="file" id="image-loader" accept="image/*"><br>
+        <button id="vr-button">Enter VR</button>
+    </div>
+
+    <!-- Three.js の読み込み -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+        let camera, scene, renderer;
+        let mesh;
+        let textureLoader, defaultTexture;
+
+        init();
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x111111);
+
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+            camera.position.set(0, 1.6, 0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            document.body.appendChild(VRButton.createButton(renderer));
+
+            // 初期プレーン（プレースホルダー用）
+            const geometry = new THREE.PlaneGeometry(1.6, 0.9);
+            const material = new THREE.MeshBasicMaterial({ color: 0x333333, side: THREE.DoubleSide });
+            mesh = new THREE.Mesh(geometry, material);
+            mesh.position.set(0, 1.6, -2.0);
+            scene.add(mesh);
+
+            // テクスチャローダー
+            textureLoader = new THREE.TextureLoader();
+
+            // ファイル選択イベントの設定
+            const fileInput = document.getElementById('image-loader');
+            fileInput.addEventListener('change', (event) => {
+                const file = event.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const dataURL = e.target.result;
+                    
+                    textureLoader.load(dataURL, (texture) => {
+                        // 画質の調整
+                        texture.colorSpace = THREE.SRGBColorSpace;
+                        
+                        // アスペクト比の計算と反映
+                        const image = texture.image;
+                        const aspect = image.width / image.height;
+                        
+                        let width = 1.6;
+                        let height = width / aspect;
+                        if (height > 1.2) {
+                            height = 1.2;
+                            width = height * aspect;
+                        }
+
+                        // メッシュの形状を更新し、テクスチャを貼り替え
+                        mesh.geometry.dispose();
+                        mesh.geometry = new THREE.PlaneGeometry(width, height);
+
+                        mesh.material.map = texture;
+                        mesh.material.color.set(0xffffff); // 色をリセット
+                        mesh.material.needsUpdate = true;
+                    });
+                };
+                reader.readAsDataURL(file);
+            });
+
+            // 環境光
+            const light = new THREE.AmbientLight(0xffffff, 1);
+            scene.add(light);
+
+            window.addEventListener('resize', onWindowResize);
+            renderer.setAnimationLoop(animate);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
