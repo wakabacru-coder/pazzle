@@ -2,16 +2,16 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>Quest2 WebXR Ultimate Image Viewer</title>
+    <title>Quest2 WebXR Multi-Image Studio</title>
     <style>
         body { margin: 0; background: #000; color: #fff; font-family: sans-serif; overflow: hidden; }
         #overlay {
             position: absolute; top: 20px; left: 20px; z-index: 10;
             background: rgba(0,0,0,0.85); padding: 20px; border-radius: 12px;
-            max-width: 320px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            max-width: 340px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
         }
         h2 { margin-top: 0; font-size: 18px; }
-        p { font-size: 13px; color: #cbd5e1; }
+        p { font-size: 13px; color: #cbd5e1; line-height: 1.4; }
         input[type="file"] { margin: 10px 0 15px; color: #fff; width: 100%; }
         button { 
             width: 100%; padding: 12px; font-size: 16px; cursor: pointer; 
@@ -23,9 +23,9 @@
 </head>
 <body>
     <div id="overlay">
-        <h2>WebXR Image Viewer (Complete)</h2>
-        <p>画像をアップロードして「Enter VR」を押してください。<br>VR内ではトリガーで画像を掴んで移動・スケールできます。</p>
-        <input type="file" id="image-loader" accept="image/*"><br>
+        <h2>WebXR Multi-Image Studio</h2>
+        <p>複数の画像を同時にアップロードできます。<br>VR内では画像の「本体」を掴んで移動、4つの「角（コーナー）」を掴んで拡大縮小できます。</p>
+        <input type="file" id="image-loader" accept="image/*" multiple><br>
         <button id="vr-button">Enter VR</button>
     </div>
 
@@ -45,86 +45,61 @@
         import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 
         let camera, scene, renderer;
-        let mesh;
         let textureLoader;
+        let imageCards = []; // 配置された画像のリスト
         
-        // コントローラー・インタラクション用変数
+        // インタラクション管理
         let controllers = [];
-        let controllerGrips = [];
-        let raycaster, intersectGroup;
-        let selectedObject = null;
-        let previousControllerPos = new THREE.Vector3();
-        let isGrabbing = false;
+        let raycaster;
+        let activeInteractions = new Map(); // controllerIndex -> { card, mode: 'move'|'scale', handleIndex, initialDist, initialScale }
 
         init();
 
         function init() {
-            // シーンの初期化
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x0f172a);
+            // 環境（背景・スカイボックス風のグラデーション空間）
+            scene.background = new THREE.Color(0x090d16);
+            
+            // 床グリッドの追加で空間の広がりをわかりやすくする
+            const grid = new THREE.GridHelper(20, 20, 0x3b82f6, 0x1e293b);
+            grid.position.y = 0;
+            scene.add(grid);
 
-            // カメラの初期化
             camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
             camera.position.set(0, 1.6, 0);
 
-            // レンダラーの初期化
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.xr.enabled = true;
             document.body.appendChild(renderer.domElement);
 
             document.body.appendChild(VRButton.createButton(renderer));
-
-            // ライティング
             scene.add(new THREE.AmbientLight(0xffffff, 1.2));
 
-            // 画像を表示するオブジェクトのグループ（拡大縮小・移動用）
-            intersectGroup = new THREE.Group();
-            intersectGroup.position.set(0, 1.6, -2.0); // 目の前2mに配置
-            scene.add(intersectGroup);
-
-            // 初期プレーン（プレースホルダー）
-            const geometry = new THREE.PlaneGeometry(1.6, 0.9);
-            const material = new THREE.MeshBasicMaterial({ color: 0x334155, side: THREE.DoubleSide });
-            mesh = new THREE.Mesh(geometry, material);
-            intersectGroup.add(mesh);
-
-            // テクスチャローダー
             textureLoader = new THREE.TextureLoader();
 
-            // ローカルファイル選択の処理
+            // 複数画像のファイル選択処理
             const fileInput = document.getElementById('image-loader');
             fileInput.addEventListener('change', (event) => {
-                const file = event.target.files[0];
-                if (!file) return;
+                const files = event.target.files;
+                if (!files.length) return;
 
-                const reader = new FileReader();
-                reader.onload = function(e) {
-                    textureLoader.load(e.target.result, (texture) => {
-                        texture.colorSpace = THREE.SRGBColorSpace;
-                        
-                        // アスペクト比の自動計算
-                        const image = texture.image;
-                        const aspect = image.width / image.height;
-                        let width = 1.6;
-                        let height = width / aspect;
-                        if (height > 1.2) {
-                            height = 1.2;
-                            width = height * aspect;
-                        }
-
-                        // メッシュの再構築
-                        mesh.geometry.dispose();
-                        mesh.geometry = new THREE.PlaneGeometry(width, height);
-                        mesh.material.map = texture;
-                        mesh.material.color.set(0xffffff);
-                        mesh.material.needsUpdate = true;
-                    });
-                };
-                reader.readAsDataURL(file);
+                let index = imageCards.length;
+                for (let i = 0; i < files.length; i++) {
+                    const file = files[i];
+                    const reader = new FileReader();
+                    
+                    reader.onload = (e) => {
+                        textureLoader.load(e.target.result, (texture) => {
+                            texture.colorSpace = THREE.SRGBColorSpace;
+                            createImageCard(texture, index++);
+                        });
+                    };
+                    reader.readAsDataURL(file);
+                }
             });
 
-            // --- WebXR コントローラーの設定 ---
+            // WebXR コントローラーの設定
             raycaster = new THREE.Raycaster();
             const controllerModelFactory = new XRControllerModelFactory();
 
@@ -138,39 +113,136 @@
                 const controllerGrip = renderer.xr.getControllerGrip(i);
                 controllerGrip.add(controllerModelFactory.createControllerModel(controllerGrip));
                 scene.add(controllerGrip);
-                controllerGrips.push(controllerGrip);
             }
 
             window.addEventListener('resize', onWindowResize);
             renderer.setAnimationLoop(animate);
         }
 
+        // 画像カードの生成（本体 ＋ 四隅のハンドラー）
+        function createImageCard(texture, index) {
+            const cardGroup = new THREE.Group();
+            
+            // アスペクト比の計算
+            const image = texture.image;
+            const aspect = image.width / image.height;
+            let baseWidth = 1.2;
+            let baseHeight = baseWidth / aspect;
+            if (baseHeight > 1.0) {
+                baseHeight = 1.0;
+                baseWidth = baseHeight * aspect;
+            }
+
+            // 配置位置を少しずつずらす（複数同時表示用）
+            const angle = (index * 0.5) % (Math.PI * 2);
+            const radius = 1.8 + Math.floor(index / 4) * 0.5;
+            cardGroup.position.set(
+                Math.sin(angle) * radius,
+                1.5 + (index % 3) * 0.2,
+                -Math.cos(angle) * radius
+            );
+            cardGroup.lookAt(0, cardGroup.position.y, 0); // プレイヤーの方向を向く
+
+            // 画像本体メッシュ
+            const geometry = new THREE.PlaneGeometry(baseWidth, baseHeight);
+            const material = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.userData = { type: 'body', parentCard: cardGroup };
+            cardGroup.add(mesh);
+
+            // 四隅のハンドラー（拡大縮小用マーカー）
+            const handleGeo = new THREE.SphereGeometry(0.04, 16, 16);
+            const handleMat = new THREE.MeshBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.7 });
+            
+            const hw = baseWidth / 2;
+            const hh = baseHeight / 2;
+            const handlePositions = [
+                [-hw, hh, 0],  // 左上
+                [hw, hh, 0],   // 右上
+                [-hw, -hh, 0], // 左下
+                [hw, -hh, 0]   // 右下
+            ];
+
+            const handles = [];
+            handlePositions.forEach((pos, hIdx) => {
+                const handle = new THREE.Mesh(handleGeo, handleMat);
+                handle.position.set(...pos);
+                handle.userData = { type: 'handle', handleIndex: hIdx, parentCard: cardGroup };
+                cardGroup.add(handle);
+                handles.push(handle);
+            });
+
+            cardGroup.userData = { 
+                width: baseWidth, 
+                height: baseHeight, 
+                mesh: mesh, 
+                handles: handles 
+            };
+
+            scene.add(cardGroup);
+            imageCards.push(cardGroup);
+        }
+
         // コントローラーのトリガーを押したとき
         function onSelectStart(event) {
             const controller = event.target;
-            
-            // レイキャストで画像を指しているか判定
-            const tempMatrix = new THREE.Matrix4();
-            tempMatrix.identity().extractRotation(controller.matrixWorld);
-            raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
-            raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+            const controllerIndex = controllers.indexOf(controller);
 
-            const intersects = raycaster.intersectObject(mesh);
+            // レイキャストですべてのカードの本体およびハンドルをチェック
+            const intersects = getIntersections(controller);
             if (intersects.length > 0) {
-                selectedObject = intersectGroup; // グループごと掴む
-                isGrabbing = true;
-                controller.attach(selectedObject); // コントローラーの子要素にして追従させる
+                const intersect = intersects[0];
+                const object = intersect.object;
+                const parentCard = object.userData.parentCard;
+
+                if (object.userData.type === 'body') {
+                    // 画像本体を掴んで移動
+                    activeInteractions.set(controllerIndex, {
+                        card: parentCard,
+                        mode: 'move'
+                    });
+                    controller.attach(parentCard); // コントローラーの子にして追従させる
+                } else if (object.userData.type === 'handle') {
+                    // 角を掴んで拡大縮小
+                    const currentScale = parentCard.scale.x;
+                    activeInteractions.set(controllerIndex, {
+                        card: parentCard,
+                        mode: 'scale',
+                        initialControllerPos: controller.position.clone(),
+                        initialScale: currentScale
+                    });
+                }
             }
         }
 
         // コントローラーのトリガーを離したとき
         function onSelectEnd(event) {
-            if (isGrabbing && selectedObject) {
-                isGrabbing = false;
-                // シーンのルートへオブジェクトを戻す
-                scene.attach(selectedObject);
-                selectedObject = null;
+            const controller = event.target;
+            const controllerIndex = controllers.indexOf(controller);
+
+            if (activeInteractions.has(controllerIndex)) {
+                const interaction = activeInteractions.get(controllerIndex);
+                if (interaction.mode === 'move') {
+                    scene.attach(interaction.card); // シーンのルートへ戻す
+                }
+                activeInteractions.delete(controllerIndex);
             }
+        }
+
+        // コントローラーからのレイとオブジェクトの交差判定
+        function getIntersections(controller) {
+            const tempMatrix = new THREE.Matrix4();
+            tempMatrix.identity().extractRotation(controller.matrixWorld);
+            raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+            raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+
+            let targets = [];
+            imageCards.forEach(card => {
+                targets.push(card.userData.mesh);
+                card.userData.handles.forEach(h => targets.push(h));
+            });
+
+            return raycaster.intersectObjects(targets, false);
         }
 
         function onWindowResize() {
@@ -180,6 +252,22 @@
         }
 
         function animate() {
+            // スケール操作中の処理（角を掴んで動かしている間、コントローラーの距離に応じて拡大縮小）
+            activeInteractions.forEach((interaction, controllerIndex) => {
+                if (interaction.mode === 'scale') {
+                    const controller = controllers[controllerIndex];
+                    const currentPos = controller.position;
+                    const initialPos = interaction.initialControllerPos;
+                    
+                    // コントローラーの移動距離に基づいてスケールを変化させる
+                    const distDelta = currentPos.distanceTo(interaction.card.position) - initialPos.distanceTo(interaction.card.position);
+                    let newScale = interaction.initialScale + distDelta * 1.5;
+                    newScale = Math.max(0.2, Math.min(newScale, 5.0)); // 最小0.2倍、最大5倍
+                    
+                    interaction.card.scale.set(newScale, newScale, newScale);
+                }
+            });
+
             renderer.render(scene, camera);
         }
     </script>
