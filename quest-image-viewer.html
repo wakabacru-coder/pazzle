@@ -11,6 +11,7 @@
 html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;overflow:hidden}
 canvas{position:fixed;inset:0;width:100%;height:100%;touch-action:none}
 #panel{position:fixed;top:max(16px,env(safe-area-inset-top,0px));left:16px;z-index:2;width:min(400px,calc(100% - 32px));max-height:calc(100% - 32px);overflow-y:auto;background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:16px 18px}
+#panel.hidden{display:none}
 h1{font-size:18px;margin:0 0 4px}
 p{margin:6px 0;font-size:13px;line-height:1.6;color:var(--sub)}
 .row{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
@@ -21,31 +22,38 @@ input[type=file]{display:none}
 #count{font-weight:600;color:var(--text)}
 ul{margin:6px 0 0;padding-left:18px;font-size:12.5px;line-height:1.7;color:var(--sub)}
 b{color:var(--text)}
+.xronly{display:none}
+body.xr .xronly{display:flex}
+body.xr .nonxr{display:none}
 </style>
 </head>
 <body>
 <div id="panel">
   <h1>Quest 画像ビューワー</h1>
-  <p>画像・動画を選んでから没入モードに入ると、周囲の空間に並べて閲覧・操作できます。</p>
+  <p class="nonxr">画像・動画を選んでから没入モードに入ると、周囲の空間に並べて閲覧・操作できます。</p>
+  <p class="xronly">没入中でもここから画像・動画を追加できます。</p>
   <div class="row">
     <label class="btn primary" for="file">画像・動画を選択…</label>
     <input id="file" type="file" accept="image/*,video/*" multiple>
     <label class="btn" for="bgfile">背景を選択…</label>
     <input id="bgfile" type="file" accept="image/*,video/*">
   </div>
-  <div class="row">
+  <div class="row nonxr">
     <button id="vr" disabled>VRで表示</button>
     <button id="ar" disabled>パススルーで表示</button>
   </div>
   <p>読み込み済み: <span id="count">0</span> 枚 <span id="status"></span></p>
   <div class="row"><button id="relayout">並べ直す</button><button id="clear">すべて削除</button></div>
-  <p><b>コントローラー操作（没入中）</b></p>
-  <ul>
-    <li><b>トリガー長押し</b>：掴んで移動・変形</li>
-    <li><b>A / X ボタン</b>：プリセットパネルの表示／閉じる</li>
-    <li><b>グリップトリガー（中指）</b>：全画像一括アニメーションの再生／停止</li>
-    <li><b>B / Y ボタン</b>：メインメニュー開閉</li>
-  </ul>
+  <div class="row xronly"><button id="closeov">この画面を閉じる（Bボタンのメニューから再表示）</button></div>
+  <div class="nonxr">
+    <p><b>コントローラー操作（没入中）</b></p>
+    <ul>
+      <li><b>トリガー長押し</b>：掴んで移動・変形</li>
+      <li><b>A / X ボタン</b>：プリセットパネルの表示／閉じる</li>
+      <li><b>グリップトリガー（中指）</b>：全画像一括アニメーションの再生／停止</li>
+      <li><b>B / Y ボタン</b>：メインメニュー開閉</li>
+    </ul>
+  </div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -65,50 +73,29 @@ renderer.xr.setReferenceSpaceType('local-floor');
 document.body.prepend(renderer.domElement);
 const grid = new THREE.GridHelper(12,24,0x30363d,0x1c2128); scene.add(grid);
 
-// ---- ピンク官能フィルターシェーダー ----
+// ---- ピンクフィルターシェーダー ----
 const VS = 'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}';
 const FS = `
 uniform sampler2D map;
 uniform float filterIntensity;
 varying vec2 vUv;
-
 void main(){
   vec4 texColor = texture2D(map, vUv);
   vec3 color = texColor.rgb;
   float lum = dot(color, vec3(0.299, 0.587, 0.114));
-
   vec3 pinkShade = vec3(
     pow(color.r, 0.82) * 1.25 + 0.08 * filterIntensity,
     pow(color.g, 1.12) * 0.78,
     pow(color.b, 0.95) * 1.10 + 0.12 * filterIntensity
   );
-
   vec3 highlightPink = mix(pinkShade, vec3(1.0, 0.35, 0.68), (1.0 - lum) * 0.4);
-  vec3 shadowMagenta  = mix(highlightPink, vec3(0.4, 0.05, 0.25), pow(1.0 - lum, 2.0) * 0.5);
-
+  vec3 shadowMagenta = mix(highlightPink, vec3(0.4, 0.05, 0.25), pow(1.0 - lum, 2.0) * 0.5);
   vec3 blended = mix(color, clamp(shadowMagenta, 0.0, 1.0), filterIntensity);
   gl_FragColor = vec4(blended, texColor.a);
 }`;
 
-// ---- SBS 180°背景シェーダー ----
-const BG_VS = 'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}';
-const BG_FS = `
-uniform sampler2D map;
-uniform float isStereo180;
-varying vec2 vUv;
-
-void main(){
-  vec2 uv = vUv;
-  if(isStereo180 > 0.5){
-    #ifdef THREE_VR
-      if(cameraIndex == 0){ uv.x = uv.x * 0.5; }
-      else { uv.x = uv.x * 0.5 + 0.5; }
-    #else
-      uv.x = uv.x * 0.5;
-    #endif
-  }
-  gl_FragColor = texture2D(map, uv);
-}`;
+// ---- 背景シェーダー（UVスケール/オフセットでSBSの左右を切り出す） ----
+const BG_FS = 'uniform sampler2D map;uniform vec2 uvScale;uniform vec2 uvOffset;varying vec2 vUv;void main(){gl_FragColor=texture2D(map,vUv*uvScale+uvOffset);}';
 
 // ---- パネル（キャンバスUI） ----
 function rr(c,x,y,w,h,r){c.beginPath();c.moveTo(x+r,y);c.arcTo(x+w,y,x+w,y+h,r);c.arcTo(x+w,y+h,x,y+h,r);c.arcTo(x,y+h,x,y,r);c.closePath();}
@@ -122,7 +109,7 @@ function makePanel(wm,hm,controls){
     if(!p.dirty) return;
     ctx.clearRect(0,0,W,H); ctx.fillStyle='rgba(22,27,34,.96)'; rr(ctx,0,0,W,H,24); ctx.fill();
     ctx.textBaseline='middle';
-    for(const c of controls){
+    for(const c of p.controls){ // ★修正: 差し替えられた controls を必ず参照する
       const lab=typeof c.label==='function'?c.label():(c.label||'');
       if(c.t==='btn'){
         ctx.fillStyle=c.on&&c.on()?'#2f6df6':'#2a313c'; rr(ctx,c.x,c.y,c.w,c.h,12); ctx.fill();
@@ -151,115 +138,75 @@ function applySlider(p,c,uv){
   c.set(v); p.dirty=true;
 }
 
-// カメラ位置・向き取得関数
-const v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
+// カメラ位置・向き（頭の姿勢）取得
+const v1 = new THREE.Vector3(), v2 = new THREE.Vector3(), v3 = new THREE.Vector3();
 function getCameraPositionAndDirection(posOut, dirOut){
+  let m=camera.matrixWorld;
   if(renderer.xr.isPresenting){
-    const xc = renderer.xr.getCamera(camera);
-    xc.getWorldPosition(posOut);
-    xc.getWorldDirection(dirOut);
-  } else {
-    camera.getWorldPosition(posOut);
-    camera.getWorldDirection(dirOut);
+    const xc=renderer.xr.getCamera(camera);
+    m=(xc.cameras&&xc.cameras.length)?xc.cameras[0].matrix:xc.matrix;
   }
-  dirOut.y = 0;
-  if(dirOut.lengthSq() < 1e-4) dirOut.set(0,0,-1);
+  posOut.setFromMatrixPosition(m);
+  dirOut.set(-m.elements[8],0,-m.elements[10]);
+  if(dirOut.lengthSq()<1e-4) dirOut.set(0,0,-1);
   dirOut.normalize();
 }
 
 // ---- ヘリ・カドハンドル ----
-const MAT_HANDLE_DEFAULT = new THREE.MeshBasicMaterial({color: 0x778899, transparent: true, opacity: 0.55, side: THREE.DoubleSide});
-const MAT_HANDLE_HOVER   = new THREE.MeshBasicMaterial({color: 0xffffff, transparent: true, opacity: 0.85, side: THREE.DoubleSide});
-const MAT_HANDLE_ACTIVE  = new THREE.MeshBasicMaterial({color: 0xff4d8d, transparent: true, opacity: 0.95, side: THREE.DoubleSide});
-
-const OPPOSITE_CORNER = { 'bl': 'tr', 'br': 'tl', 'tr': 'bl', 'tl': 'br' };
+const MAT_HANDLE_DEFAULT = new THREE.MeshBasicMaterial({color:0x778899,transparent:true,opacity:.55,side:THREE.DoubleSide});
+const MAT_HANDLE_HOVER   = new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:.85,side:THREE.DoubleSide});
+const MAT_HANDLE_ACTIVE  = new THREE.MeshBasicMaterial({color:0xff4d8d,transparent:true,opacity:.95,side:THREE.DoubleSide});
+const OPPOSITE_CORNER = {bl:'tr',br:'tl',tr:'bl',tl:'br'};
+const HM = 0.03;
 
 function makeHandles(it){
-  if(it.handlesGroup) it.group.remove(it.handlesGroup);
-  const hGroup = new THREE.Group();
-  const w = it.w, h = it.h;
-  const margin = 0.03;
-
-  const heliDefs = [
-    {name: 'left',   pos: [-w/2 - margin, 0, 0],            size: [0.025, h * 0.4, 0.015]},
-    {name: 'right',  pos: [ w/2 + margin, 0, 0],            size: [0.025, h * 0.4, 0.015]},
-    {name: 'bottom', pos: [0, -h/2 - margin, 0],            size: [w * 0.4, 0.025, 0.015]},
-    {name: 'top',    pos: [0,  h/2 + margin, 0],            size: [w * 0.4, 0.025, 0.015]}
-  ];
-  const allHandles = [];
-  heliDefs.forEach(d => {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(d.size[0], d.size[1], d.size[2]), MAT_HANDLE_DEFAULT.clone());
-    m.position.set(d.pos[0], d.pos[1], d.pos[2]);
-    m.userData = {item: it, type: 'heli', side: d.name};
-    hGroup.add(m); allHandles.push(m);
-  });
-
-  const cornerDefs = [
-    {name: 'bl', pos: [-w/2 - margin, -h/2 - margin, 0]},
-    {name: 'br', pos: [ w/2 + margin, -h/2 - margin, 0]},
-    {name: 'tr', pos: [ w/2 + margin,  h/2 + margin, 0]},
-    {name: 'tl', pos: [-w/2 - margin,  h/2 + margin, 0]}
-  ];
-  cornerDefs.forEach(d => {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.04, 0.015), MAT_HANDLE_DEFAULT.clone());
-    m.position.set(d.pos[0], d.pos[1], d.pos[2]);
-    m.userData = {item: it, type: 'corner', corner: d.name};
-    hGroup.add(m); allHandles.push(m);
-  });
-
-  it.group.add(hGroup);
-  it.handlesGroup = hGroup;
-  it.allHandles = allHandles;
+  if(it.handlesGroup){ it.group.remove(it.handlesGroup); it.handlesGroup.traverse(o=>{if(o.geometry)o.geometry.dispose();}); }
+  const hGroup=new THREE.Group(), w=it.w, h=it.h, all=[];
+  const add=(geo,pos,ud)=>{const m=new THREE.Mesh(geo,MAT_HANDLE_DEFAULT);m.position.set(pos[0],pos[1],0);m.userData=Object.assign({item:it},ud);hGroup.add(m);all.push(m);};
+  add(new THREE.BoxGeometry(.025,h*.4,.015),[-w/2-HM,0],{type:'heli',side:'left'});
+  add(new THREE.BoxGeometry(.025,h*.4,.015),[ w/2+HM,0],{type:'heli',side:'right'});
+  add(new THREE.BoxGeometry(w*.4,.025,.015),[0,-h/2-HM],{type:'heli',side:'bottom'});
+  add(new THREE.BoxGeometry(w*.4,.025,.015),[0, h/2+HM],{type:'heli',side:'top'});
+  [['bl',-1,-1],['br',1,-1],['tr',1,1],['tl',-1,1]].forEach(([n,sx,sy])=>
+    add(new THREE.BoxGeometry(.04,.04,.015),[sx*(w/2+HM),sy*(h/2+HM)],{type:'corner',corner:n}));
+  it.group.add(hGroup); it.handlesGroup=hGroup; it.allHandles=all;
 }
-
-function updateHandleVisibility(it, activeHandleObj = null){
-  if(!it || !it.allHandles) return;
-  it.allHandles.forEach(h => {
-    if(!activeHandleObj){
-      h.visible = true;
-      h.material = MAT_HANDLE_DEFAULT;
-    } else {
-      if(h === activeHandleObj){
-        h.visible = true;
-        h.material = MAT_HANDLE_ACTIVE;
-      } else {
-        h.visible = false;
-      }
-    }
+function updateHandleVisibility(it, active=null){
+  if(!it||!it.allHandles) return;
+  it.allHandles.forEach(h=>{
+    if(!active){h.visible=true;h.material=MAT_HANDLE_DEFAULT;}
+    else if(h===active){h.visible=true;h.material=MAT_HANDLE_ACTIVE;}
+    else h.visible=false;
   });
 }
-
-function getCornerLocalPos(cornerName, w, h){
-  const margin = 0.03;
-  const sx = (cornerName === 'tr' || cornerName === 'br') ? 1 : -1;
-  const sy = (cornerName === 'tr' || cornerName === 'tl') ? 1 : -1;
-  return new THREE.Vector3(sx * (w/2 + margin), sy * (h/2 + margin), 0);
+function getCornerLocalPos(n,w,h){
+  return new THREE.Vector3((n==='tr'||n==='br'?1:-1)*(w/2+HM),(n==='tr'||n==='tl'?1:-1)*(h/2+HM),0);
 }
 
 // ---- 画像・動画アイテム ----
 const items=[]; let editItem=null;
 
 function makeItem(tex,w,h,video){
-  const mat=new THREE.ShaderMaterial({
-    uniforms:{ map:{value:tex}, filterIntensity:{value:0.0} },
-    vertexShader:VS, fragmentShader:FS, side:THREE.DoubleSide
-  });
+  const mat=new THREE.ShaderMaterial({uniforms:{map:{value:tex},filterIntensity:{value:0.0}},vertexShader:VS,fragmentShader:FS,side:THREE.DoubleSide});
   const group=new THREE.Group();
   const mesh=new THREE.Mesh(new THREE.PlaneGeometry(w,h),mat);
   group.add(mesh); scene.add(group);
-
   const it={
-    group, mesh, tex, mat, u:mat.uniforms, w, h, initialW: w, initialH: h, video:video||null, vp:null,
-    animating: false, animTime: 0, animDepth: 2.0, animSpeed: 1.0,
-    orbitAnimating: false, orbitAngle: 0, orbitRadius: 2.5, orbitSpeed: 1.0,
-    basePos: new THREE.Vector3(),
-    animDir: new THREE.Vector3(0,0,1) // プリセット1のアニメーションは手前方向（+Z）
+    group,mesh,tex,mat,u:mat.uniforms,w,h,initialW:w,initialH:h,video:video||null,vp:null,
+    animating:false,animTime:0,animDepth:2.0,animSpeed:1.0,
+    orbitAnimating:false,orbitAngle:0,orbitRadius:2.5,orbitSpeed:1.0,
+    basePos:new THREE.Vector3(),animDir:new THREE.Vector3(0,0,1),activeHandle:null
   };
-
   mesh.userData.item=it;
   makeHandles(it);
   if(video) it.vp=makeVideoPanel(it);
   items.push(it); return it;
+}
+// サイズ変更（ジオメトリ・ハンドル・動画パネル・編集パネルを一括更新）
+function resizeItem(it,w,h){
+  it.w=w; it.h=h; it.mesh.geometry.dispose(); it.mesh.geometry=new THREE.PlaneGeometry(w,h); makeHandles(it);
+  if(it.vp){const s=Math.max(w,.6)/it.vp.wm; it.vp.group.scale.setScalar(s); it.vp.group.position.y=-(h/2+.02+.05*s);}
+  if(editItem===it) ep.group.position.x=w/2+.04+ep.wm/2;
 }
 
 async function addImage(file){
@@ -274,353 +221,327 @@ function addVideo(file){
   return new Promise((res,rej)=>{
     const v=document.createElement('video'), url=URL.createObjectURL(file);
     v.src=url; v.playsInline=true; v.preload='auto'; v.volume=.8;
-    v.onerror=()=>rej(new Error('video'));
+    v.onerror=()=>{URL.revokeObjectURL(url);rej(new Error('video'));};
     v.onloadedmetadata=()=>{
       const tex=new THREE.VideoTexture(v); tex.minFilter=tex.magFilter=THREE.LinearFilter;
-      const it=makeItem(tex,.7*v.videoWidth/v.videoHeight,.7,v); it.url=url; v.currentTime=.01; res();
+      const it=makeItem(tex,.7*v.videoWidth/v.videoHeight,.7,v); it.url=url;
+      v.onplay=v.onpause=()=>{it.vp.dirty=true;};
+      v.currentTime=.01; res();
     };
   });
 }
 function toggle(v){ v.paused?v.play().catch(()=>{}):v.pause(); }
 function makeVideoPanel(it){
-  const v=it.video, wm=Math.max(it.w,.6), W=wm*600;
+  const v=it.video, wm=Math.max(it.w,.6), W=Math.round(wm*600);
   const p=makePanel(wm,.1,[
     {t:'btn',x:8,y:8,w:56,h:44,label:()=>v.paused?'▶':'❚❚',act:()=>toggle(v)},
     {t:'sld',x:76,y:8,w:W-76-170,h:44,label:'',get:()=>v.duration?v.currentTime/v.duration:0,set:x=>{if(v.duration)v.currentTime=x*v.duration;}},
-    {t:'btn',x:W-86,y:8,w:0,h:0,label:'',act:()=>{}},
     {t:'btn',x:W-150,y:8,w:44,h:44,label:()=>v.muted||v.volume===0?'×':'♪',act:()=>{v.muted=!v.muted;}},
     {t:'sld',x:W-98,y:8,w:88,h:44,label:'',get:()=>v.muted?0:v.volume,set:x=>{v.muted=false;v.volume=x;}}
   ]);
-  p.controls.splice(2,1);
   p.group.position.set(0,-(it.h/2+.02+.05),.004); p.owner=it; it.group.add(p.group); return p;
 }
 function removeItem(it){
-  controllers.forEach(c=>{if(c.userData.grab===it)c.userData.grab=null;});
+  controllers.forEach(c=>{
+    const u=c.userData;
+    if(u.grab===it){u.grab=null;u.grabType=null;u.handleObj=null;}
+    if(u.hit&&u.hit.object.userData.item===it) u.hit=null;
+  });
   if(editItem===it) exitEdit();
   if(it.video){it.video.pause();it.video.removeAttribute('src');it.video.load();URL.revokeObjectURL(it.url);}
-  it.group.parent&&it.group.parent.remove(it.group); it.tex.dispose();
+  it.group.parent&&it.group.parent.remove(it.group);
+  it.tex.dispose(); it.mesh.geometry.dispose(); it.mat.dispose();
+  if(it.handlesGroup) it.handlesGroup.traverse(o=>{if(o.geometry)o.geometry.dispose();});
+  if(it.vp){it.vp.mesh.geometry.dispose();it.vp.mesh.material.map.dispose();it.vp.mesh.material.dispose();}
   const i=items.indexOf(it); if(i>=0) items.splice(i,1); updateCount();
 }
-function layout(){
+function layoutBase(){
   const R=2.2, gap=.14, per=5, rows=[];
   for(let i=0;i<items.length;i+=per) rows.push(items.slice(i,i+per));
   rows.forEach((row,ri)=>{
     const y=1.5-(ri-(rows.length-1)/2)*1.05;
-    let a=-(row.reduce((s,it)=>s+(it.w+gap)/R,0)-gap/R)/2;
+    let a=-(row.reduce((s,it)=>s+(it.initialW+gap)/R,0)-gap/R)/2;
     row.forEach(it=>{
-      const th=a+it.w/R/2; a+=(it.w+gap)/R;
+      it.animating=false; it.orbitAnimating=false;
+      resizeItem(it,it.initialW,it.initialH);
+      const th=a+it.initialW/R/2; a+=(it.initialW+gap)/R;
       scene.attach(it.group); it.group.scale.set(1,1,1);
       it.group.position.set(R*Math.sin(th),y,-R*Math.cos(th)); it.group.lookAt(0,y,0);
     });
   });
 }
+function layout(){
+  currentPresetMode='none'; isPreset1Animating=false; isPreset2Animating=false;
+  layoutBase(); buildPresetControls();
+}
 function updateCount(){ $('count').textContent=items.length; }
 
 // ---- プリセット状態管理 ----
-let currentPresetMode = 'none'; // 'preset1' または 'preset2'
-let isPreset1Animating = false;
-let isPreset2Animating = false;
-
-// プリセットパラメータグローバル値
-let globalScale = 1.0;
-let preset1DepthLimit = 3.0; // 手前アニメ移動限度（最大10m）
-let preset1Speed = 1.0;      // 0.5〜10.0倍
-let preset1Spacing = 0.8;    // 奥へ伸びる間隔
-
-let preset2Scale = 1.0;
-let preset2Speed = 1.0;      // 0.5〜10.0倍
+let currentPresetMode='none', isPreset1Animating=false, isPreset2Animating=false;
+let globalScale=1.0, preset1DepthLimit=3.0, preset1Speed=1.0, preset1Spacing=0.8;
+let preset2Scale=1.0, preset2Speed=1.0;
 
 function updatePreset1Layout(){
-  const startZ = -1.2;
-  items.forEach((it, idx) => {
-    scene.attach(it.group);
-    // 全画像のサイズ一括変更
-    const aspect = it.initialW / it.initialH;
-    it.w = 0.7 * globalScale * aspect;
-    it.h = 0.7 * globalScale;
-    it.mesh.geometry.dispose();
-    it.mesh.geometry = new THREE.PlaneGeometry(it.w, it.h);
-    makeHandles(it);
-
-    it.group.position.set(0, 1.5, startZ - idx * preset1Spacing);
+  items.forEach((it,idx)=>{
+    scene.attach(it.group); it.group.scale.set(1,1,1);
+    const aspect=it.initialW/it.initialH;
+    resizeItem(it,.7*globalScale*aspect,.7*globalScale);
+    it.group.position.set(0,1.5,-1.2-idx*preset1Spacing);
     it.group.rotation.set(0,0,0);
     it.basePos.copy(it.group.position);
-    it.animDepth = preset1DepthLimit;
-    it.animSpeed = preset1Speed;
-    it.animDir.set(0, 0, 1); // 元の位置から「手前」方向へ移動
+    it.animDepth=preset1DepthLimit; it.animSpeed=preset1Speed; it.animDir.set(0,0,1);
+    it.animating=isPreset1Animating; it.animTime=0;
   });
 }
-
 function updatePreset2Layout(){
-  const R = 2.5, total = items.length;
-  items.forEach((it, idx) => {
-    scene.attach(it.group);
-    const aspect = it.initialW / it.initialH;
-    it.w = 0.7 * preset2Scale * aspect;
-    it.h = 0.7 * preset2Scale;
-    it.mesh.geometry.dispose();
-    it.mesh.geometry = new THREE.PlaneGeometry(it.w, it.h);
-    makeHandles(it);
-
-    const angle = (idx / Math.max(1, total)) * 2 * PI;
-    it.orbitAngle = angle;
-    it.orbitRadius = R;
-    it.orbitSpeed = preset2Speed;
-    it.group.position.set(R * Math.sin(angle), 1.5, -R * Math.cos(angle));
-    it.group.lookAt(0, 1.5, 0);
+  const R=2.5, total=items.length;
+  items.forEach((it,idx)=>{
+    scene.attach(it.group); it.group.scale.set(1,1,1);
+    const aspect=it.initialW/it.initialH;
+    resizeItem(it,.7*preset2Scale*aspect,.7*preset2Scale);
+    const angle=(idx/Math.max(1,total))*2*PI;
+    it.orbitAngle=angle; it.orbitRadius=R; it.orbitSpeed=preset2Speed;
+    it.orbitAnimating=isPreset2Animating;
+    it.group.position.set(R*Math.sin(angle),1.5,-R*Math.cos(angle));
+    it.group.lookAt(0,1.5,0);
     it.basePos.copy(it.group.position);
   });
 }
-
-function applyPreset1(){
-  currentPresetMode = 'preset1';
-  isPreset1Animating = false;
-  isPreset2Animating = false;
-  items.forEach(it => { it.animating = false; it.orbitAnimating = false; });
-  updatePreset1Layout();
+function applyPreset(n){
+  currentPresetMode=n; isPreset1Animating=false; isPreset2Animating=false;
+  items.forEach(it=>{it.animating=false;it.orbitAnimating=false;});
+  n==='preset1'?updatePreset1Layout():updatePreset2Layout();
   buildPresetControls();
 }
-
-function applyPreset2(){
-  currentPresetMode = 'preset2';
-  isPreset1Animating = false;
-  isPreset2Animating = false;
-  items.forEach(it => { it.animating = false; it.orbitAnimating = false; });
-  updatePreset2Layout();
-  buildPresetControls();
-}
-
 function togglePresetAnimationByGrip(){
-  if(currentPresetMode === 'preset1'){
-    isPreset1Animating = !isPreset1Animating;
-    items.forEach(it => {
-      it.animating = isPreset1Animating;
-      if(isPreset1Animating){
-        it.basePos.copy(it.group.position);
-        it.animTime = 0;
-      } else {
-        it.group.position.copy(it.basePos);
-      }
+  if(currentPresetMode==='preset1'){
+    isPreset1Animating=!isPreset1Animating;
+    items.forEach(it=>{
+      it.animating=isPreset1Animating;
+      if(isPreset1Animating){it.basePos.copy(it.group.position);it.animTime=0;}
+      else it.group.position.copy(it.basePos);
     });
-  } else if(currentPresetMode === 'preset2'){
-    isPreset2Animating = !isPreset2Animating;
-    items.forEach(it => {
-      it.orbitAnimating = isPreset2Animating;
-    });
+  }else if(currentPresetMode==='preset2'){
+    isPreset2Animating=!isPreset2Animating;
+    items.forEach(it=>{it.orbitAnimating=isPreset2Animating;});
   }
 }
 
 // ---- 編集パネル ----
 const ep=makePanel(.85,.68,[
-  {t:'sld',x:20,y:20,w:440,h:65,label:'ピンク官能フィルター',snap:true,get:()=>editItem?editItem.u.filterIntensity.value:0,set:v=>{if(editItem)editItem.u.filterIntensity.value=v;}},
-  {t:'sld',x:20,y:110,w:440,h:60,label:()=>'アニメ奥行き: '+(editItem?(editItem.animDepth).toFixed(1)+'m':''),get:()=>editItem?editItem.animDepth/10.0:0.2,set:v=>{if(editItem)editItem.animDepth=v*10.0;}},
+  {t:'sld',x:20,y:20,w:440,h:65,label:'ピンクフィルター',snap:true,get:()=>editItem?editItem.u.filterIntensity.value:0,set:v=>{if(editItem)editItem.u.filterIntensity.value=v;}},
+  {t:'sld',x:20,y:110,w:440,h:60,label:()=>'アニメ奥行き: '+(editItem?editItem.animDepth.toFixed(1)+'m':''),get:()=>editItem?editItem.animDepth/10:0.2,set:v=>{if(editItem)editItem.animDepth=v*10;}},
   {t:'btn',x:20,y:195,w:440,h:55,label:'フィルターリセット',act:()=>{
     if(!editItem)return;
-    editItem.u.filterIntensity.value = 0;
-    if(editItem.animating){ editItem.animating=false; editItem.group.position.copy(editItem.basePos); }
+    editItem.u.filterIntensity.value=0;
+    if(editItem.animating){editItem.animating=false;editItem.group.position.copy(editItem.basePos);}
     editItem.animDepth=2.0;
   }},
   {t:'btn',x:20,y:270,w:440,h:50,label:'画像を削除',act:()=>{const it=editItem;exitEdit();removeItem(it);}}
 ]);
-
 function enterEdit(it){
   exitEdit(); editItem=it; ep.owner=it; it.group.add(ep.group);
   ep.group.position.set(it.w/2+.04+ep.wm/2,0,.01); ep.dirty=true;
 }
 function exitEdit(){ if(editItem) editItem.group.remove(ep.group); editItem=null; }
 
-// ---- プリセットパネル（動的コントロール切り替え） ----
-let presetMenuControls = [];
-const presetMenu = makePanel(.9, .75, []);
-presetMenu.group.visible = false; scene.add(presetMenu.group);
+// ---- プリセットパネル ----
+const presetMenu=makePanel(.9,.75,[]);
+presetMenu.group.visible=false; scene.add(presetMenu.group);
 
 function buildPresetControls(){
-  presetMenuControls.length = 0;
-  presetMenuControls.push(
+  const c=[
     {t:'txt',x:20,y:10,w:500,h:35,label:'プリセット選択 & パラメータ調整',size:24},
-    {t:'btn',x:20,y:55,w:240,h:55,label:'1. 手前〜奥整列',on:()=>currentPresetMode==='preset1',act:()=>applyPreset1()},
-    {t:'btn',x:270,y:55,w:240,h:55,label:'2. サラウンド円形',on:()=>currentPresetMode==='preset2',act:()=>applyPreset2()}
-  );
-
-  if(currentPresetMode === 'preset1'){
-    presetMenuControls.push(
-      {t:'sld',x:20,y:125,w:490,h:55,label:()=>'全画像サイズ: '+(globalScale).toFixed(2)+'x',get:()=>(globalScale-0.2)/2.8,set:v=>{globalScale=0.2+v*2.8; updatePreset1Layout();}},
-      {t:'sld',x:20,y:190,w:490,h:55,label:()=>'手前アニメ移動限度: '+(preset1DepthLimit).toFixed(1)+'m',get:()=>preset1DepthLimit/10.0,set:v=>{preset1DepthLimit=Math.max(0.1, v*10.0); updatePreset1Layout();}},
-      {t:'sld',x:20,y:255,w:490,h:55,label:()=>'アニメ速度: '+(preset1Speed).toFixed(1)+'x',get:()=>(preset1Speed-0.5)/9.5,set:v=>{preset1Speed=0.5+v*9.5; updatePreset1Layout();}},
-      {t:'sld',x:20,y:320,w:490,h:55,label:()=>'奥への画像間隔: '+(preset1Spacing).toFixed(2)+'m',get:()=>(preset1Spacing-0.1)/2.9,set:v=>{preset1Spacing=0.1+v*2.9; updatePreset1Layout();}}
+    {t:'btn',x:20,y:55,w:240,h:55,label:'1. 手前〜奥整列',on:()=>currentPresetMode==='preset1',act:()=>applyPreset('preset1')},
+    {t:'btn',x:270,y:55,w:240,h:55,label:'2. サラウンド円形',on:()=>currentPresetMode==='preset2',act:()=>applyPreset('preset2')}
+  ];
+  if(currentPresetMode==='preset1'){
+    c.push(
+      {t:'sld',x:20,y:125,w:490,h:55,label:()=>'全画像サイズ: '+globalScale.toFixed(2)+'x',get:()=>(globalScale-0.2)/2.8,set:v=>{globalScale=0.2+v*2.8;updatePreset1Layout();}},
+      {t:'sld',x:20,y:190,w:490,h:55,label:()=>'手前アニメ移動限度: '+preset1DepthLimit.toFixed(1)+'m',get:()=>preset1DepthLimit/10,set:v=>{preset1DepthLimit=Math.max(0.1,v*10);updatePreset1Layout();}},
+      {t:'sld',x:20,y:255,w:490,h:55,label:()=>'アニメ速度: '+preset1Speed.toFixed(1)+'x',get:()=>(preset1Speed-0.5)/9.5,set:v=>{preset1Speed=0.5+v*9.5;updatePreset1Layout();}},
+      {t:'sld',x:20,y:320,w:490,h:55,label:()=>'奥への画像間隔: '+preset1Spacing.toFixed(2)+'m',get:()=>(preset1Spacing-0.1)/2.9,set:v=>{preset1Spacing=0.1+v*2.9;updatePreset1Layout();}}
     );
-  } else if(currentPresetMode === 'preset2'){
-    presetMenuControls.push(
-      {t:'sld',x:20,y:140,w:490,h:65,label:()=>'全画像サイズ: '+(preset2Scale).toFixed(2)+'x',get:()=>(preset2Scale-0.2)/2.8,set:v=>{preset2Scale=0.2+v*2.8; updatePreset2Layout();}},
-      {t:'sld',x:20,y:230,w:490,h:65,label:()=>'旋回速度: '+(preset2Speed).toFixed(1)+'x',get:()=>(preset2Speed-0.5)/9.5,set:v=>{preset2Speed=0.5+v*9.5; updatePreset2Layout();}}
+  }else if(currentPresetMode==='preset2'){
+    c.push(
+      {t:'sld',x:20,y:140,w:490,h:65,label:()=>'全画像サイズ: '+preset2Scale.toFixed(2)+'x',get:()=>(preset2Scale-0.2)/2.8,set:v=>{preset2Scale=0.2+v*2.8;updatePreset2Layout();}},
+      {t:'sld',x:20,y:230,w:490,h:65,label:()=>'旋回速度: '+preset2Speed.toFixed(1)+'x',get:()=>(preset2Speed-0.5)/9.5,set:v=>{preset2Speed=0.5+v*9.5;updatePreset2Layout();}}
     );
+  }else{
+    c.push({t:'txt',x:20,y:140,w:500,h:35,label:'上のボタンでレイアウトを選んでください',size:22});
   }
-  presetMenu.controls = presetMenuControls;
-  presetMenu.dirty = true;
+  presetMenu.controls=c; presetMenu.dirty=true;
 }
-
-// 初期コントロール構築
 buildPresetControls();
 
+function placeInFront(panel,dy,side){
+  getCameraPositionAndDirection(v1,v2);
+  const g=panel.group;
+  scene.attach(g); g.scale.set(1,1,1);
+  g.position.copy(v1).addScaledVector(v2,1.2).addScaledVector(v3.set(-v2.z,0,v2.x),side*.5);
+  g.position.y=v1.y+dy;
+  g.lookAt(v1.x,g.position.y,v1.z);
+  panel.dirty=true;
+}
 function togglePresetPanel(){
-  const pm = presetMenu.group;
-  pm.visible = !pm.visible;
-  if(!pm.visible) return;
-  getCameraPositionAndDirection(v1, v2);
-  scene.attach(pm); pm.scale.set(1,1,1);
-  pm.position.copy(v1).addScaledVector(v2, 1.1);
-  pm.position.y = v1.y;
-  pm.lookAt(v1.x, pm.position.y, v1.z);
-  presetMenu.dirty = true;
+  presetMenu.group.visible=!presetMenu.group.visible;
+  if(presetMenu.group.visible) placeInFront(presetMenu,0,1);
 }
 
-// ---- 背景 ----
-let bgMode='none', bgTex=null, bgVideo=null, bgName='';
-const bgMat = new THREE.ShaderMaterial({
-  uniforms: { map: { value: null }, isStereo180: { value: 0.0 } },
-  vertexShader: BG_VS, fragmentShader: BG_FS, side: THREE.DoubleSide
-});
-const bgMesh=new THREE.Mesh(new THREE.BufferGeometry(), bgMat);
-bgMesh.position.y=1.6; bgMesh.renderOrder=-1; bgMesh.frustumCulled=false; bgMesh.visible=false; scene.add(bgMesh);
+// ---- 背景（360° / 180° SBS ステレオ） ----
+let bgMode='none', bgTex=null, bgVideo=null, bgUrl=null, bgName='';
+const mkBgMat=(sx,ox)=>new THREE.ShaderMaterial({
+  uniforms:{map:{value:null},uvScale:{value:new THREE.Vector2(sx,1)},uvOffset:{value:new THREE.Vector2(ox,0)}},
+  vertexShader:VS,fragmentShader:BG_FS,side:THREE.DoubleSide,depthWrite:false});
+const bgMat=mkBgMat(1,0), bgMatL=mkBgMat(.5,0), bgMatR=mkBgMat(.5,.5);
+const mkBgMesh=(m,layer)=>{const o=new THREE.Mesh(new THREE.BufferGeometry(),m);o.position.y=1.6;o.renderOrder=-1;o.frustumCulled=false;o.visible=false;o.layers.set(layer);scene.add(o);return o;};
+const bgMesh=mkBgMesh(bgMat,0), bgL=mkBgMesh(bgMatL,1), bgR=mkBgMesh(bgMatR,2); // layer1=左目 / layer2=右目
 
 function setBgMode(m){
-  bgMode=m; bgMesh.geometry.dispose();
-  const is180 = (m === '180');
-  const g = is180 ? new THREE.SphereGeometry(30,64,32,PI,PI) : new THREE.SphereGeometry(30,64,32);
-  g.scale(-1,1,1); bgMesh.geometry=g;
-  bgMat.uniforms.isStereo180.value = is180 ? 1.0 : 0.0;
+  bgMode=m; const is180=m==='180';
+  const g=is180?new THREE.SphereGeometry(30,64,32,-PI/2,PI):new THREE.SphereGeometry(30,64,32);
+  g.scale(-1,1,1);
+  [bgMesh,bgL,bgR].forEach(o=>{o.geometry.dispose();o.geometry=g;});
+  bgMat.uniforms.uvScale.value.x=is180?.5:1; // 非没入時は左目側のみ表示
   applyMode(); menu.dirty=true;
 }
-
 async function loadBg(file){
-  if(bgTex) bgTex.dispose();
-  if(bgVideo){bgVideo.pause();bgVideo=null;}
+  let tex,vid=null,url=null;
   if(file.type.startsWith('video')){
-    const v=document.createElement('video'); v.src=URL.createObjectURL(file); v.loop=true; v.playsInline=true; bgVideo=v;
-    bgTex=new THREE.VideoTexture(v); bgTex.minFilter=bgTex.magFilter=THREE.LinearFilter;
-    v.play().catch(()=>{v.muted=true;v.play().catch(()=>{});});
+    url=URL.createObjectURL(file); vid=document.createElement('video'); vid.src=url; vid.loop=true; vid.playsInline=true;
+    tex=new THREE.VideoTexture(vid); tex.minFilter=tex.magFilter=THREE.LinearFilter;
+    vid.play().catch(()=>{vid.muted=true;vid.play().catch(()=>{});});
   }else{
     const bmp=await createImageBitmap(file), s=Math.min(1,4096/Math.max(bmp.width,bmp.height));
     const c=document.createElement('canvas'); c.width=Math.round(bmp.width*s); c.height=Math.round(bmp.height*s);
     c.getContext('2d').drawImage(bmp,0,0,c.width,c.height); if(bmp.close) bmp.close();
-    bgTex=new THREE.CanvasTexture(c);
+    tex=new THREE.CanvasTexture(c);
   }
-  bgMat.uniforms.map.value = bgTex;
-  bgMat.needsUpdate=true; bgName=file.name;
+  if(bgTex) bgTex.dispose(); if(bgVideo) bgVideo.pause(); if(bgUrl) URL.revokeObjectURL(bgUrl);
+  bgTex=tex; bgVideo=vid; bgUrl=url; bgName=file.name;
+  [bgMat,bgMatL,bgMatR].forEach(m=>{m.uniforms.map.value=tex;});
   setBgMode(bgMode==='none'?'360':bgMode);
 }
 
 // ---- XRセッション ----
-let session=null, mode='vr', pending=null, arOK=false;
+let session=null, mode='vr', pending=null, arOK=false, resume=null;
 function applyMode(){
   const ar=mode==='ar'&&!!session;
   scene.background=ar?null:new THREE.Color(BGC); renderer.setClearAlpha(ar?0:1);
-  grid.visible=!ar; bgMesh.visible=!ar&&bgMode!=='none'&&!!bgTex; menu.dirty=true;
+  grid.visible=!ar;
+  const show=!ar&&bgMode!=='none'&&!!bgTex, stereo=show&&bgMode==='180'&&!!session;
+  bgMesh.visible=show&&!stereo; bgL.visible=bgR.visible=stereo;
+  document.body.classList.toggle('xr',!!session);
+  menu.dirty=true;
 }
 async function startXR(m){
-  const opts = {
-    optionalFeatures: ['local-floor', 'bounded-floor', 'dom-overlay'],
-    domOverlay: { root: document.getElementById('panel') }
-  };
-  const s=await navigator.xr.requestSession(m==='ar'?'immersive-ar':'immersive-vr', opts);
-  session=s; mode=m; renderer.xr.setSession(s); applyMode();
+  const type=m==='ar'?'immersive-ar':'immersive-vr';
+  let s;
+  try{
+    s=await navigator.xr.requestSession(type,{optionalFeatures:['local-floor','bounded-floor','dom-overlay'],domOverlay:{root:$('panel')}});
+  }catch(e){
+    s=await navigator.xr.requestSession(type,{optionalFeatures:['local-floor']});
+  }
   s.addEventListener('end',()=>{
-    session=null; menu.group.visible=false; presetMenu.group.visible=false; exitEdit(); applyMode();
+    session=null; menu.group.visible=false; presetMenu.group.visible=false; exitEdit();
+    $('panel').classList.remove('hidden'); applyMode();
     const p=pending; pending=null;
     if(p) startXR(p).catch(()=>{$('status').textContent='ボタンを押して '+(p==='ar'?'パススルー':'VR')+' に切り替えてください';});
   });
+  session=s; mode=m;
+  await renderer.xr.setSession(s);
+  $('panel').classList.remove('hidden'); applyMode();
 }
-function endXR(msg){ if(msg) $('status').textContent='画像・動画を選択してください'; pending=null; session&&session.end(); }
+function endXR(){ pending=null; resume=null; session&&session.end(); }
 
 // ---- メインメニュー ----
 const bgBtn=(x,m,l)=>({t:'btn',x,y:262,w:160,h:64,label:l,on:()=>bgMode===m,act:()=>setBgMode(m)});
 const menu=makePanel(.9,.8,[
   {t:'txt',x:20,y:12,w:300,h:40,label:'メニュー',size:30},
   {t:'btn',x:20,y:70,w:245,h:64,label:'没入モード解除',act:()=>endXR()},
-  {t:'btn',x:275,y:70,w:245,h:64,label:'画像・動画選択',act:()=>{}},
+  {t:'btn',x:275,y:70,w:245,h:64,label:'画像・動画選択',act:()=>{
+    if(!session) return;
+    if(session.domOverlayState){ $('panel').classList.toggle('hidden'); } // 没入中は2Dオーバーレイを表示/非表示
+    else{ resume=mode; $('status').textContent='画像・動画を選択してください（選択後に自動で没入へ戻ります）'; session.end(); }
+  }},
   {t:'btn',x:20,y:150,w:500,h:64,label:()=>'パススルー：'+(mode==='ar'?'ON':'OFF'),on:()=>mode==='ar',act:()=>{
-    if(!arOK&&mode!=='ar'){return;}
+    if(!arOK&&mode!=='ar') return;
     pending=mode==='ar'?'vr':'ar'; session&&session.end();}},
   {t:'txt',x:20,y:226,w:400,h:30,label:'背景',size:24},
   bgBtn(20,'none','なし'),bgBtn(190,'360','360°'),bgBtn(360,'180','180°(SBS)'),
-  {t:'btn',x:20,y:346,w:500,h:64,label:'背景ファイル選択',act:()=>$('bgfile').click()},
+  {t:'btn',x:20,y:346,w:500,h:64,label:'背景ファイル選択',act:()=>{
+    if(session&&session.domOverlayState) $('panel').classList.remove('hidden'); else $('bgfile').click();}},
   {t:'txt',x:20,y:420,w:500,h:40,label:()=>'背景: '+(bgName||'未選択')+(mode==='ar'?'（パススルー中は非表示）':''),size:22}
 ]);
 menu.group.visible=false; scene.add(menu.group);
-
 function toggleMenu(){
-  const m=menu.group; m.visible=!m.visible; if(!m.visible) return;
-  getCameraPositionAndDirection(v1, v2);
-  scene.attach(m); m.scale.set(1,1,1);
-  m.position.copy(v1).addScaledVector(v2, 1.1);
-  m.position.y = v1.y - .1;
-  m.lookAt(v1.x, m.position.y, v1.z);
-  menu.dirty = true;
+  menu.group.visible=!menu.group.visible;
+  if(menu.group.visible) placeInFront(menu,-.1,-1);
 }
 
 // ---- コントローラー制御 ----
 const controllers=[], ray=new THREE.Raycaster(), tm=new THREE.Matrix4(), wp=new THREE.Vector3();
+const _pl=new THREE.Plane(), _n=new THREE.Vector3(), _q=new THREE.Quaternion(), _gp=new THREE.Vector3();
 let lastClick={item:null,t:0};
 const lineGeo=new THREE.CylinderGeometry(.004,.004,1,6); lineGeo.rotateX(PI/2); lineGeo.translate(0,0,-.5);
+
+function setRay(c){
+  tm.identity().extractRotation(c.matrixWorld);
+  ray.ray.origin.setFromMatrixPosition(c.matrixWorld);
+  ray.ray.direction.set(0,0,-1).applyMatrix4(tm);
+}
+function castFrom(c,objs){ setRay(c); return ray.intersectObjects(objs,false)[0]||null; }
+// 画像の面を通る平面とコントローラーレイの交点
+function rayPlanePoint(c,g,out){
+  setRay(c);
+  _n.set(0,0,1).applyQuaternion(g.getWorldQuaternion(_q));
+  _pl.setFromNormalAndCoplanarPoint(_n,g.getWorldPosition(_gp));
+  return ray.ray.intersectPlane(_pl,out);
+}
+const dz=v=>Math.abs(v)<.15?0:v;
 
 for(let i=0;i<2;i++){
   const c=renderer.xr.getController(i);
   const line=new THREE.Mesh(lineGeo,new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:.35,depthWrite:false}));
   line.scale.z=5; c.add(line);
-
-  c.userData={
-    hit:null, grab:null, grabType:null, handleObj:null, drag:null, line, src:null, prev:[], t0:0,
-    p0:new THREE.Vector3(),
-    grabRayIntersection: new THREE.Vector3(),
-    initialW: 0.7, initialH: 0.7, initialRayDist: 1.0,
-    oppositeWorldPos: new THREE.Vector3(),
-    clickItem:null
-  };
+  c.userData={hit:null,grab:null,grabType:null,handleObj:null,drag:null,line,src:null,prev:[],t0:0,
+    p0:new THREE.Vector3(),grabRayIntersection:new THREE.Vector3(),
+    initialW:.7,initialH:.7,initialRayDist:1,oppositeWorldPos:new THREE.Vector3(),clickItem:null};
 
   c.addEventListener('connected',e=>{c.userData.src=e.data;});
-  c.addEventListener('disconnected',()=>{c.userData.src=null;});
+  c.addEventListener('disconnected',()=>{c.userData.src=null;c.userData.prev=[];});
 
   c.addEventListener('selectstart',()=>{
     const u=c.userData, h=u.hit; if(!h) return;
-    const p=h.object.userData.panel, it=h.object.userData.item;
-    const handleType = h.object.userData.type;
+    const p=h.object.userData.panel, it=h.object.userData.item, handleType=h.object.userData.type;
 
     if(p){
       const ct=ctlAt(p,h.uv);
       if(ct&&ct.t==='btn'){ct.act();p.dirty=true;return;}
       if(ct&&ct.t==='sld'){u.drag={p,ctl:ct};applySlider(p,ct,h.uv);return;}
-      let target=p.owner||{group:p.group};
-      u.grab=target; u.clickItem=null; c.attach(target.group);
+      const target=p.owner||{group:p.group};
+      if(controllers.some(o=>o!==c&&o.userData.grab===target)) return;
+      u.grab=target; u.grabType='panel'; u.clickItem=null; c.attach(target.group);
       return;
     }
-
     if(handleType){
-      u.grab = it;
-      u.grabType = handleType;
-      u.handleObj = h.object;
+      if(it.activeHandle) return;
+      u.grab=it; u.grabType=handleType; u.handleObj=h.object; it.activeHandle=h.object;
       u.grabRayIntersection.copy(h.point);
-      updateHandleVisibility(it, h.object);
-
-      if(handleType === 'corner'){
-        u.initialW = it.w;
-        u.initialH = it.h;
-        const grabbedCorner = h.object.userData.corner;
-        const oppCornerName = OPPOSITE_CORNER[grabbedCorner];
-        const localOpp = getCornerLocalPos(oppCornerName, it.w, it.h);
-        u.oppositeWorldPos.copy(localOpp).applyMatrix4(it.group.matrixWorld);
-        u.initialRayDist = Math.max(0.01, h.point.distanceTo(u.oppositeWorldPos));
+      updateHandleVisibility(it,h.object);
+      if(handleType==='corner'){
+        u.initialW=it.w; u.initialH=it.h;
+        it.group.updateMatrixWorld(true);
+        u.oppositeWorldPos.copy(getCornerLocalPos(OPPOSITE_CORNER[h.object.userData.corner],it.w,it.h)).applyMatrix4(it.group.matrixWorld);
+        const p0=new THREE.Vector3();
+        u.initialRayDist=Math.max(.01,(rayPlanePoint(c,it.group,p0)?p0:h.point).distanceTo(u.oppositeWorldPos));
       }
       return;
     }
-
     if(it){
       if(controllers.some(o=>o.userData.grab===it)) return;
-      u.grab = it;
-      u.grabType = 'item';
-      u.clickItem = it;
-      u.t0 = performance.now();
-      c.getWorldPosition(u.p0);
-      c.attach(it.group);
+      u.grab=it; u.grabType='item'; u.clickItem=it; u.t0=performance.now();
+      c.getWorldPosition(u.p0); c.attach(it.group);
     }
   });
 
@@ -628,19 +549,13 @@ for(let i=0;i<2;i++){
     const u=c.userData;
     if(u.drag){u.drag=null;return;}
     if(!u.grab) return;
-
-    if(u.grab.allHandles){
-      updateHandleVisibility(u.grab, null);
-    }
-
-    const grabbedIt = u.grab;
-    scene.attach(grabbedIt.group);
-
+    const g=u.grab;
+    if(g.allHandles){g.activeHandle=null;updateHandleVisibility(g,null);}
+    scene.attach(g.group);
     u.grab=null; u.grabType=null; u.handleObj=null;
-    if(u.clickItem&&performance.now()-u.t0<350&&c.getWorldPosition(wp).distanceTo(u.p0)<.05) onClick(grabbedIt);
+    if(u.clickItem&&performance.now()-u.t0<350&&c.getWorldPosition(wp).distanceTo(u.p0)<.05) onClick(g);
     u.clickItem=null;
   });
-
   scene.add(c); controllers.push(c);
 }
 
@@ -650,27 +565,15 @@ function onClick(it){
   if(dbl){
     lastClick={item:null,t:0};
     if(it.video) toggle(it.video);
-    if(editItem === it){ exitEdit(); } else { enterEdit(it); }
-  } else {
-    lastClick={item:it,t:now};
-  }
+    if(editItem===it) exitEdit(); else enterEdit(it);
+  }else lastClick={item:it,t:now};
 }
-
-function castFrom(c,objs){
-  tm.identity().extractRotation(c.matrixWorld);
-  ray.ray.origin.setFromMatrixPosition(c.matrixWorld);
-  ray.ray.direction.set(0,0,-1).applyMatrix4(tm);
-  return ray.intersectObjects(objs,false)[0]||null;
-}
-const dz=v=>Math.abs(v)<.15?0:v;
 
 function update(dt){
   const picks=[];
   items.forEach(i=>{
     picks.push(i.mesh);
-    if(i.allHandles){
-      i.allHandles.forEach(h => { if(h.visible) picks.push(h); });
-    }
+    if(i.allHandles) i.allHandles.forEach(h=>{if(h.visible)picks.push(h);});
     if(i.vp) picks.push(i.vp.mesh);
   });
   if(menu.group.visible) picks.push(menu.mesh);
@@ -685,170 +588,111 @@ function update(dt){
       u.line.scale.z=h?h.distance:3;
     }else if(u.grab){
       u.line.scale.z=.3;
-      const it = u.grab;
-      const g = it.group;
+      const it=u.grab, g=it.group;
+      const sx=gp?dz(gp.axes[2]||0):0, sy=gp?dz(gp.axes[3]||0):0;
 
-      const sx = gp ? dz(gp.axes[2]) : 0;
-      const sy = gp ? dz(gp.axes[3]) : 0;
-
-      if(u.grabType === 'item'){
-        if(gp&&gp.axes.length>=4){
-          g.position.z = Math.min(-.2, g.position.z + sy * dt * 2);
-          const currentScale = g.scale.x;
-          const newScale = Math.min(3, Math.max(.2, currentScale * (1 + sx * dt)));
-          g.scale.setScalar(newScale);
+      if(u.grabType==='item'){
+        g.position.z=Math.min(-.2,g.position.z+sy*dt*2);
+        g.scale.setScalar(Math.min(3,Math.max(.2,g.scale.x*(1+sx*dt))));
+      }else if(u.grabType==='corner'){
+        const cur=new THREE.Vector3();
+        if(rayPlanePoint(c,g,cur)){
+          if(Math.abs(sx)>.01) u.initialRayDist=Math.max(.01,u.initialRayDist/(1+sx*dt));
+          let sf=Math.max(.01,cur.distanceTo(u.oppositeWorldPos))/u.initialRayDist;
+          sf=Math.max(sf,.15/Math.min(u.initialW,u.initialH));
+          const name=u.handleObj.userData.corner;
+          resizeItem(it,u.initialW*sf,u.initialH*sf);
+          u.handleObj=it.allHandles.find(h=>h.userData.corner===name); it.activeHandle=u.handleObj;
+          updateHandleVisibility(it,u.handleObj);
+          const signX=(name==='tr'||name==='br')?1:-1, signY=(name==='tr'||name==='tl')?1:-1;
+          const off=new THREE.Vector3(-signX*(it.w/2+HM),-signY*(it.h/2+HM),0).multiplyScalar(g.scale.x).applyQuaternion(g.quaternion);
+          g.position.copy(u.oppositeWorldPos).sub(off);
         }
-      }else if(u.grabType === 'corner'){
-        const h = castFrom(c, [it.mesh]);
-        let currentRayPos = new THREE.Vector3();
-        if(h){
-          currentRayPos.copy(h.point);
-        } else {
-          const plane = new THREE.Plane(new THREE.Vector3(0,0,1).applyQuaternion(g.quaternion), -g.position.dot(new THREE.Vector3(0,0,1).applyQuaternion(g.quaternion)));
-          ray.ray.intersectPlane(plane, currentRayPos);
-        }
-
-        const grabbedCorner = u.handleObj.userData.corner;
-        const currentDist = Math.max(0.01, currentRayPos.distanceTo(u.oppositeWorldPos));
-        let scaleFactor = currentDist / u.initialRayDist;
-
-        if(Math.abs(sx) > 0.01) scaleFactor *= (1 + sx * dt);
-
-        const newW = Math.max(0.15, u.initialW * scaleFactor);
-        const newH = Math.max(0.15, u.initialH * scaleFactor);
-
-        it.w = newW;
-        it.h = newH;
-
-        const signX = (grabbedCorner === 'tr' || grabbedCorner === 'br') ? 1 : -1;
-        const signY = (grabbedCorner === 'tr' || grabbedCorner === 'tl') ? 1 : -1;
-        const margin = 0.03;
-        const localOppOffset = new THREE.Vector3(-signX * (newW/2 + margin), -signY * (newH/2 + margin), 0);
-        const worldOppOffset = localOppOffset.applyQuaternion(g.quaternion);
-
-        g.position.copy(u.oppositeWorldPos).sub(worldOppOffset);
-
-        it.mesh.geometry.dispose();
-        it.mesh.geometry = new THREE.PlaneGeometry(it.w, it.h);
-        makeHandles(it);
-        updateHandleVisibility(it, u.handleObj);
-
-      }else if(u.grabType === 'heli'){
-        const side = u.handleObj.userData.side;
-        const h = castFrom(c, [it.mesh]);
-        let currentRayPos = new THREE.Vector3();
-        if(h){
-          currentRayPos.copy(h.point);
-        } else {
-          currentRayPos.copy(u.grabRayIntersection);
-        }
-
-        const rayDelta = currentRayPos.clone().sub(u.grabRayIntersection);
-        u.grabRayIntersection.copy(currentRayPos);
-        rayDelta.clampScalar(-0.08, 0.08);
-
-        const deltaRot = (rayDelta.x + rayDelta.y) * 1.5;
-        if(Math.abs(deltaRot) > 0.00001){
-          if(side === 'top' || side === 'bottom'){
-            g.rotation.x += deltaRot;
-          } else if(side === 'left' || side === 'right'){
-            g.rotation.y += deltaRot;
-          }
+      }else if(u.grabType==='heli'){
+        const side=u.handleObj.userData.side;
+        const h=castFrom(c,[it.mesh]);
+        const cur=h?h.point.clone():u.grabRayIntersection.clone();
+        const d=cur.clone().sub(u.grabRayIntersection);
+        u.grabRayIntersection.copy(cur);
+        d.clampScalar(-.08,.08);
+        const dr=(d.x+d.y)*1.5;
+        if(Math.abs(dr)>1e-5){
+          if(side==='top'||side==='bottom') g.rotation.x+=dr; else g.rotation.y+=dr;
         }
       }
     }else{
       const h=castFrom(c,picks); u.hit=h; u.line.scale.z=h?h.distance:5;
-
-      items.forEach(item => {
-        if(item.allHandles){
-          item.allHandles.forEach(handle => {
-            if(h && h.object === handle){
-              handle.material = MAT_HANDLE_HOVER;
-            } else {
-              if(!u.grab) handle.material = MAT_HANDLE_DEFAULT;
-            }
-          });
-        }
-      });
     }
 
     if(gp){
       const dn=i=>!!(gp.buttons[i]&&gp.buttons[i].pressed);
 
-      // 中指トリガー（グリップボタン）：プリセット一括アニメーション（選択時）または単一アニメ切替
-      const dn1 = dn(1);
-      if(dn1 && !u.prev[1]){
-        if(currentPresetMode !== 'none'){
-          togglePresetAnimationByGrip();
-        } else if(u.hit){
-          const it = u.hit.object.userData.item;
+      const dn1=dn(1); // グリップ
+      if(dn1&&!u.prev[1]){
+        if(currentPresetMode!=='none') togglePresetAnimationByGrip();
+        else if(u.hit){
+          const it=u.hit.object.userData.item;
           if(it){
-            it.animating = !it.animating;
+            it.animating=!it.animating;
             if(it.animating){
               it.basePos.copy(it.group.position);
-              getCameraPositionAndDirection(v1, v2);
-              const yaw = Math.atan2(v2.x, v2.z);
-              const snappedYaw = Math.round(yaw / (PI / 2)) * (PI / 2);
-              it.animDir.set(Math.sin(snappedYaw), 0, Math.cos(snappedYaw)).normalize();
-              it.animDir.negate();
-              it.animTime = 0;
-            } else {
-              it.group.position.copy(it.basePos);
-            }
+              getCameraPositionAndDirection(v1,v2);
+              const yaw=Math.atan2(v2.x,v2.z), sy=Math.round(yaw/(PI/2))*(PI/2);
+              it.animDir.set(Math.sin(sy),0,Math.cos(sy)).normalize().negate();
+              it.animTime=0;
+            }else it.group.position.copy(it.basePos);
           }
         }
       }
-      u.prev[1] = dn1;
+      u.prev[1]=dn1;
 
-      // スティック押し込みで回転を90°にスナップ
-      const dn3 = dn(3);
-      if(dn3 && !u.prev[3] && u.hit){
-        const it = u.hit.object.userData.item;
-        if(it){
-          const r = it.group.rotation;
-          r.x = Math.round(r.x / (PI / 2)) * (PI / 2);
-          r.y = Math.round(r.y / (PI / 2)) * (PI / 2);
-          r.z = Math.round(r.z / (PI / 2)) * (PI / 2);
-        }
+      const dn3=dn(3); // スティック押し込み：90°スナップ
+      if(dn3&&!u.prev[3]&&u.hit){
+        const it=u.hit.object.userData.item;
+        if(it){const r=it.group.rotation;
+          r.x=Math.round(r.x/(PI/2))*(PI/2); r.y=Math.round(r.y/(PI/2))*(PI/2); r.z=Math.round(r.z/(PI/2))*(PI/2);}
       }
-      u.prev[3] = dn3;
+      u.prev[3]=dn3;
 
-      // A / X ボタン（ボタン4）：プリセットパネルの表示/非表示（トグル）
-      const dn4 = dn(4);
-      if(dn4 && !u.prev[4]){
-        if(renderer.xr.isPresenting) togglePresetPanel();
-      }
-      u.prev[4] = dn4;
+      const dn4=dn(4); // A / X
+      if(dn4&&!u.prev[4]&&renderer.xr.isPresenting) togglePresetPanel();
+      u.prev[4]=dn4;
 
-      // B / Y ボタン（ボタン5）：メインメニュー開閉
-      const dn5 = dn(5);
-      if(dn5 && !u.prev[5]){
-        if(renderer.xr.isPresenting) toggleMenu();
-      }
-      u.prev[5] = dn5;
+      const dn5=dn(5); // B / Y
+      if(dn5&&!u.prev[5]&&renderer.xr.isPresenting) toggleMenu();
+      u.prev[5]=dn5;
     }
   });
 
-  // アニメーション計算
+  // ハンドルのホバー表示（2本のコントローラーで競合しないよう一括処理）
+  const hov=new Set();
+  controllers.forEach(c=>{const u=c.userData; if(u.hit&&!u.grab&&!u.drag) hov.add(u.hit.object);});
+  items.forEach(it=>{
+    if(it.allHandles&&!it.activeHandle) it.allHandles.forEach(h=>{h.material=hov.has(h)?MAT_HANDLE_HOVER:MAT_HANDLE_DEFAULT;});
+  });
+
+  // アニメーション（掴んでいる間は停止）
   items.forEach(i=>{
-    if(i.animating){
-      const spd = i.animSpeed || 1.0;
-      i.animTime += dt * spd;
-      const d = (Math.sin(i.animTime * 2 - PI/2) + 1) * 0.5 * i.animDepth;
-      i.group.position.copy(i.basePos).addScaledVector(i.animDir, d);
-    } else if(i.orbitAnimating){
-      const spd = i.orbitSpeed || 1.0;
-      i.orbitAngle += dt * 0.5 * spd;
-      const R = i.orbitRadius || 2.5;
-      i.group.position.set(R * Math.sin(i.orbitAngle), 1.5, -R * Math.cos(i.orbitAngle));
-      i.group.lookAt(0, 1.5, 0);
+    const free=i.group.parent===scene;
+    if(i.animating&&free){
+      i.animTime+=dt*(i.animSpeed||1);
+      const d=(Math.sin(i.animTime*2-PI/2)+1)*.5*i.animDepth;
+      i.group.position.copy(i.basePos).addScaledVector(i.animDir,d);
+    }else if(i.orbitAnimating&&free){
+      i.orbitAngle+=dt*.5*(i.orbitSpeed||1);
+      const R=i.orbitRadius||2.5;
+      i.group.position.set(R*Math.sin(i.orbitAngle),1.5,-R*Math.cos(i.orbitAngle));
+      i.group.lookAt(0,1.5,0);
     }
-    if(i.vp) if(i.vp.dirty) i.vp.draw();
+    if(i.vp){
+      if(i.video&&!i.video.paused&&((i.vpT=(i.vpT||0)+dt)>.2)){i.vpT=0;i.vp.dirty=true;} // シークバー更新
+      if(i.vp.dirty) i.vp.draw();
+    }
   });
 
-  if(menu.group.visible && menu.dirty) menu.draw();
-  if(presetMenu.group.visible && presetMenu.dirty) presetMenu.draw();
-  if(editItem && ep.dirty) ep.draw();
+  if(menu.group.visible&&menu.dirty) menu.draw();
+  if(presetMenu.group.visible&&presetMenu.dirty) presetMenu.draw();
+  if(editItem&&ep.dirty) ep.draw();
 }
 
 const clock=new THREE.Clock();
@@ -872,28 +716,33 @@ async function handleFiles(files){
   for(const f of files){
     try{ f.type.startsWith('video')?await addVideo(f):await addImage(f); }catch(err){fail++;console.warn(err);}
   }
-  layout(); updateCount();
+  if(currentPresetMode==='preset1') updatePreset1Layout();
+  else if(currentPresetMode==='preset2') updatePreset2Layout();
+  else layout();
+  updateCount();
   $('status').textContent=fail?fail+' 件は読み込めませんでした':'';
+  if(resume){const m=resume;resume=null;startXR(m).catch(()=>{$('status').textContent='「VRで表示」または「パススルーで表示」を押して戻ってください';});}
 }
 
-$('file').addEventListener('change',async e=>{
-  await handleFiles([...e.target.files]);
-  e.target.value='';
-});
+$('file').addEventListener('change',async e=>{ await handleFiles([...e.target.files]); e.target.value=''; });
 $('bgfile').addEventListener('change',async e=>{
   const f=e.target.files[0]; if(!f) return;
   try{await loadBg(f);$('status').textContent='背景を設定しました';}catch(err){$('status').textContent='背景を読み込めませんでした';}
   e.target.value='';
+  if(resume){const m=resume;resume=null;startXR(m).catch(()=>{});}
 });
-$('relayout').onclick=layout;
+$('relayout').onclick=()=>layout();
 $('clear').onclick=()=>{[...items].forEach(removeItem);};
+$('closeov').onclick=()=>$('panel').classList.add('hidden');
+// 2Dオーバーレイ操作が背後の3D空間の選択として扱われないようにする
+$('panel').addEventListener('beforexrselect',e=>e.preventDefault());
 
 if(navigator.xr){
-  navigator.xr.isSessionSupported('immersive-vr').then(ok=>{$('vr').disabled=!ok;if(!ok)$('status').textContent='This browser does not support VR';}).catch(()=>{});
+  navigator.xr.isSessionSupported('immersive-vr').then(ok=>{$('vr').disabled=!ok;if(!ok)$('status').textContent='このブラウザはVR非対応です';}).catch(()=>{});
   navigator.xr.isSessionSupported('immersive-ar').then(ok=>{arOK=ok;$('ar').disabled=!ok;}).catch(()=>{});
 }else $('status').textContent='WebXR非対応です（Quest ブラウザで開いてください）';
 
-const go=m=>()=>startXR(m).catch(err=>{$('status').textContent='没入モードを開始できませんでした';console.warn(err);});
+const go=m=>()=>{resume=null;startXR(m).catch(err=>{$('status').textContent='没入モードを開始できませんでした';console.warn(err);});};
 $('vr').onclick=go('vr'); $('ar').onclick=go('ar');
 })();
 </script>
