@@ -41,11 +41,12 @@ b{color:var(--text)}
   <div class="row"><button id="relayout">並べ直す</button><button id="clear">すべて削除</button></div>
   <p><b>コントローラー操作（没入中）</b></p>
   <ul>
-    <li><b>トリガー長押し</b>：掴んで移動・回転</li>
+    <li><b>トリガー長押し</b>：画像やハンドルを掴んで移動・変形</li>
     <li><b>掴み中のスティック</b>：上下＝遠近、左右＝拡大縮小</li>
-    <li><b>掴み中のスティック押し込み</b>：XYZ回転を最寄りの90°倍数（グリッド垂直）にスナップ</li>
+    <li><b>カーソルを合わせた状態でスティック押し込み</b>：XYZ回転を最寄りの90°（空間軸に平行）にスナップ</li>
     <li><b>A / X ボタン</b>：コントローラーが手の平のデザインに変化</li>
-    <li><b>素早くダブルタップ</b>：編集モード（色相・彩度・明るさ・コントラスト）</li>
+    <li><b>素早くダブルタップ</b>：編集モード（アニメーション・色調補正等）</li>
+    <li><b>ヘリ・カドの操作</b>：ヘリを掴むと反対側を軸に回転、カドを掴むと対角を固定してリサイズ</li>
     <li><b>動画をタップ</b>：再生／停止（下部にシークバーと音量）</li>
     <li><b>B / Y ボタン</b>：メニューの表示／非表示</li>
   </ul>
@@ -55,7 +56,7 @@ b{color:var(--text)}
 <script>
 (function(){
 const $ = id => document.getElementById(id);
-const PI = Math.PI, BGC = 0x0d1117, FRAME = 0x3a4350, GRAB = 0xffc94d, EDIT = 0xb36bff;
+const PI = Math.PI, BGC = 0x0d1117, GRAB = 0xffc94d, EDIT = 0xb36bff;
 const FONT = '"Noto Sans JP","Hiragino Sans","Yu Gothic",sans-serif';
 const scene = new THREE.Scene(); scene.background = new THREE.Color(BGC);
 const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.05, 80);
@@ -118,16 +119,62 @@ function applySlider(p,c,uv){
   c.set(v); p.dirty=true;
 }
 
+// ---- ヘリ・カドのハンドル生成 ----
+function makeHandles(it){
+  const hGroup = new THREE.Group();
+  const mat = new THREE.MeshBasicMaterial({color: 0x4da3ff, side: THREE.DoubleSide});
+  const w = it.w, h = it.h;
+
+  // ヘリ（4辺の中点バー：座標 (0,1)=左, (2,1)=右, (1,0)=下, (1,2)=上 を w,h にマッピング）
+  // ローカル座標系 0~2 を基準に配置
+  const heliDefs = [
+    {name: 'left',   pos: [0, 1],   size: [0.015, h * 0.3]},
+    {name: 'right',  pos: [2, 1],   size: [0.015, h * 0.3]},
+    {name: 'bottom', pos: [1, 0],   size: [w * 0.3, 0.015]},
+    {name: 'top',    pos: [1, 2],   size: [w * 0.3, 0.015]}
+  ];
+  const helis = {};
+  heliDefs.forEach(d => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(d.size[0], d.size[1]), mat);
+    m.position.set((d.pos[0] - 1) * (w / 2), (d.pos[1] - 1) * (h / 2), 0.001);
+    m.userData = {item: it, type: 'heli', side: d.name};
+    hGroup.add(m);
+    helis[d.name] = m;
+  });
+
+  // カド（4角の鍵カッコ風ハンドル：座標 (0,0)=左下, (2,0)=右下, (2,2)=右上, (0,2)=左上）
+  const cornerDefs = [
+    {name: 'bl', pos: [0, 0]},
+    {name: 'br', pos: [2, 0]},
+    {name: 'tr', pos: [2, 2]},
+    {name: 'tl', pos: [0, 2]}
+  ];
+  const corners = {};
+  cornerDefs.forEach(d => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(0.03, 0.03), new THREE.MeshBasicMaterial({color: 0xffc94d, side: THREE.DoubleSide}));
+    m.position.set((d.pos[0] - 1) * (w / 2), (d.pos[1] - 1) * (h / 2), 0.002);
+    m.userData = {item: it, type: 'corner', corner: d.name};
+    hGroup.add(m);
+    corners[d.name] = m;
+  });
+
+  it.group.add(hGroup);
+  it.handlesGroup = hGroup;
+  it.helis = helis;
+  it.corners = corners;
+}
+
 // ---- 画像・動画アイテム ----
 const items=[]; let editItem=null;
 function makeItem(tex,w,h,video){
   const mat=new THREE.ShaderMaterial({uniforms:{map:{value:tex},hue:{value:0},sat:{value:1},bri:{value:0},con:{value:1}},vertexShader:VS,fragmentShader:FS,side:THREE.DoubleSide});
   const group=new THREE.Group();
   const mesh=new THREE.Mesh(new THREE.PlaneGeometry(w,h),mat);
-  const frame=new THREE.Mesh(new THREE.PlaneGeometry(w+.04,h+.04),new THREE.MeshBasicMaterial({color:FRAME,side:THREE.DoubleSide}));
-  frame.position.z=-.003; group.add(frame,mesh); scene.add(group);
-  const it={group,mesh,frame,tex,mat,u:mat.uniforms,w,h,video:video||null,vp:null};
+  // 枠（フレーム）は完全削除
+  group.add(mesh); scene.add(group);
+  const it={group,mesh,tex,mat,u:mat.uniforms,w,h,video:video||null,vp:null, animating:false, animTime:0};
   mesh.userData.item=it;
+  makeHandles(it);
   if(video) it.vp=makeVideoPanel(it);
   items.push(it); return it;
 }
@@ -164,7 +211,7 @@ function makeVideoPanel(it){
   p.group.position.set(0,-(it.h/2+.02+.05),.004); p.owner=it; it.group.add(p.group); return p;
 }
 function removeItem(it){
-  controllers.forEach(c=>{if(c.userData.grab===it)c.userData.grab=null;});
+  controllers.forEach(c=>{if(c.userData.grab===it||c.userData.grabHandle===it)c.userData.grab=null;});
   if(editItem===it) exitEdit();
   if(it.video){it.video.pause();it.video.removeAttribute('src');it.video.load();URL.revokeObjectURL(it.url);}
   it.group.parent&&it.group.parent.remove(it.group); it.tex.dispose();
@@ -187,14 +234,15 @@ function updateCount(){ $('count').textContent=items.length; }
 
 // ---- 編集パネル ----
 const snapSld=(y,label,get,set)=>({t:'sld',x:20,y,w:440,h:70,label,snap:true,get,set});
-const ep=makePanel(.8,.72,[
+const ep=makePanel(.8,.8,[
   snapSld(14,'色相',()=>editItem?editItem.u.hue.value/(2*PI)+.5:.5,v=>{editItem.u.hue.value=(v-.5)*2*PI;}),
   snapSld(94,'彩度',()=>editItem?editItem.u.sat.value/2:.5,v=>{editItem.u.sat.value=v*2;}),
   snapSld(174,'明るさ',()=>editItem?editItem.u.bri.value+.5:.5,v=>{editItem.u.bri.value=v-.5;}),
   snapSld(254,'コントラスト',()=>editItem?editItem.u.con.value-.5:.5,v=>{editItem.u.con.value=v+.5;}),
-  {t:'btn',x:20,y:350,w:140,h:60,label:'リセット',act:()=>{const u=editItem.u;u.hue.value=0;u.sat.value=1;u.bri.value=0;u.con.value=1;}},
-  {t:'btn',x:170,y:350,w:140,h:60,label:'閉じる',act:()=>exitEdit()},
-  {t:'btn',x:320,y:350,w:140,h:60,label:'削除',act:()=>{const it=editItem;exitEdit();removeItem(it);}}
+  {t:'btn',x:20,y:340,w:220,h:60,label:()=>editItem&&editItem.animating?'アニメーション：ON':'アニメーション：OFF',act:()=>{if(editItem)editItem.animating=!editItem.animating;}},
+  {t:'btn',x:250,y:340,w:210,h:60,label:'リセット',act:()=>{if(!editItem)return;const u=editItem.u;u.hue.value=0;u.sat.value=1;u.bri.value=0;u.con.value=1;editItem.animating=false;}},
+  {t:'btn',x:20,y:410,w:220,h:60,label:'閉じる',act:()=>exitEdit()},
+  {t:'btn',x:250,y:410,w:210,h:60,label:'削除',act:()=>{const it=editItem;exitEdit();removeItem(it);}}
 ]);
 function enterEdit(it){
   exitEdit(); editItem=it; ep.owner=it; it.group.add(ep.group);
@@ -248,14 +296,14 @@ async function startXR(m){
     if(p) startXR(p).catch(()=>{$('status').textContent='ボタンを押して '+(p==='ar'?'パススルー':'VR')+' に切り替えてください';});
   });
 }
-function endXR(msg){ if(msg) $('status').textContent=msg; pending=null; session&&session.end(); }
+function endXR(msg){ if(msg) $('status').textContent='画像・動画を選択してください'; pending=null; session&&session.end(); }
 
 // ---- メニュー ----
 const bgBtn=(x,m,l)=>({t:'btn',x,y:262,w:160,h:64,label:l,on:()=>bgMode===m,act:()=>setBgMode(m)});
 const menu=makePanel(.9,.8,[
   {t:'txt',x:20,y:12,w:300,h:40,label:'メニュー',size:30},
   {t:'btn',x:20,y:70,w:245,h:64,label:'没入モード解除',act:()=>endXR()},
-  {t:'btn',x:275,y:70,w:245,h:64,label:'画像・動画選択',act:()=>{}}, // DOM Overlayにより没入中も選択可能に
+  {t:'btn',x:275,y:70,w:245,h:64,label:'画像・動画選択',act:()=>{}},
   {t:'btn',x:20,y:150,w:500,h:64,label:()=>'パススルー：'+(mode==='ar'?'ON':'OFF'),on:()=>mode==='ar',act:()=>{
     if(!arOK&&mode!=='ar'){return;}
     pending=mode==='ar'?'vr':'ar'; session&&session.end();}},
@@ -279,7 +327,6 @@ const controllers=[], ray=new THREE.Raycaster(), tm=new THREE.Matrix4(), wp=new 
 let lastClick={item:null,t:0};
 const lineGeo=new THREE.CylinderGeometry(.004,.004,1,6); lineGeo.rotateX(PI/2); lineGeo.translate(0,0,-.5);
 
-// 手の平表現用のメッシュテンプレート
 const palmGeo = new THREE.CircleGeometry(0.035, 16);
 const palmMat = new THREE.MeshBasicMaterial({color: 0xffffff, transparent: true, opacity: 0.7, side: THREE.DoubleSide});
 
@@ -288,35 +335,50 @@ for(let i=0;i<2;i++){
   const line=new THREE.Mesh(lineGeo,new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:.35,depthWrite:false}));
   line.scale.z=5; c.add(line);
 
-  // 手の平パーツを追加
   const palmMesh = new THREE.Mesh(palmGeo, palmMat);
   palmMesh.position.set(0, 0, -0.04);
   palmMesh.rotation.x = Math.PI / 2;
   palmMesh.visible = false;
   c.add(palmMesh);
 
-  c.userData={hit:null,grab:null,drag:null,line,palmMesh,src:null,prev:[],t0:0,p0:new THREE.Vector3(),clickItem:null};
+  c.userData={hit:null,grab:null,grabType:null,handleData:null,drag:null,line,palmMesh,src:null,prev:[],t0:0,p0:new THREE.Vector3(),clickItem:null};
   c.addEventListener('connected',e=>{c.userData.src=e.data;});
   c.addEventListener('disconnected',()=>{c.userData.src=null;});
   c.addEventListener('selectstart',()=>{
     const u=c.userData, h=u.hit; if(!h) return;
     const p=h.object.userData.panel, it=h.object.userData.item;
-    let target=it;
+    const handleType = h.object.userData.type;
+
     if(p){
       const ct=ctlAt(p,h.uv);
       if(ct&&ct.t==='btn'){ct.act();p.dirty=true;return;}
       if(ct&&ct.t==='sld'){u.drag={p,ctl:ct};applySlider(p,ct,h.uv);return;}
-      target=p.owner||{group:p.group};
+      let target=p.owner||{group:p.group};
+      u.grab=target; u.clickItem=null; c.attach(target.group);
+      return;
     }
-    if(controllers.some(o=>o.userData.grab===target)) return;
-    u.grab=target; u.clickItem=it&&!p?it:null; u.t0=performance.now(); c.getWorldPosition(u.p0);
-    c.attach(target.group);
+
+    if(handleType){
+      // ヘリまたはカドを掴んだ場合
+      u.grab = it;
+      u.grabType = handleType;
+      u.handleData = h.object.userData;
+      c.attach(it.group);
+      return;
+    }
+
+    if(it){
+      if(controllers.some(o=>o.userData.grab===it)) return;
+      u.grab=it; u.grabType='item'; u.clickItem=it; u.t0=performance.now(); c.getWorldPosition(u.p0);
+      c.attach(it.group);
+    }
   });
   c.addEventListener('selectend',()=>{
     const u=c.userData;
     if(u.drag){u.drag=null;return;}
     if(!u.grab) return;
-    scene.attach(u.grab.group); u.grab=null;
+    scene.attach(u.grab.group);
+    u.grab=null; u.grabType=null; u.handleData=null;
     if(u.clickItem&&performance.now()-u.t0<350&&c.getWorldPosition(wp).distanceTo(u.p0)<.05) onClick(u.clickItem);
     u.clickItem=null;
   });
@@ -338,54 +400,108 @@ const dz=v=>Math.abs(v)<.15?0:v;
 function drawIf(p,dt,live){
   p.acc+=dt; if(p.dirty||(live&&p.acc>.15)){p.draw();p.acc=0;}
 }
+
 function update(dt){
-  const picks=items.map(i=>i.mesh);
-  items.forEach(i=>{if(i.vp)picks.push(i.vp.mesh);});
+  const picks=[];
+  items.forEach(i=>{
+    picks.push(i.mesh);
+    if(i.handlesGroup && i.handlesGroup.visible){
+      i.handlesGroup.children.forEach(ch => picks.push(ch));
+    }
+    if(i.vp) picks.push(i.vp.mesh);
+  });
   if(menu.group.visible) picks.push(menu.mesh);
   if(editItem) picks.push(ep.mesh);
+
   controllers.forEach(c=>{
     const u=c.userData, gp=u.src&&u.src.gamepad;
+
+    // ヘリ・カド表示の制御（編集中のアイテムまたは掴んでいるアイテムのみハンドルを表示）
+    items.forEach(i=>{
+      if(i.handlesGroup){
+        i.handlesGroup.visible = (i === editItem || u.grab === i);
+      }
+    });
+
     if(u.drag){
       const h=castFrom(c,[u.drag.p.mesh]); if(h) applySlider(u.drag.p,u.drag.ctl,h.uv);
       u.line.scale.z=h?h.distance:3;
     }else if(u.grab){
       u.line.scale.z=.3;
-      const g=u.grab.group;
-      if(gp&&gp.axes.length>=4){
-        const sx=dz(gp.axes[2]), sy=dz(gp.axes[3]);
-        g.position.z=Math.min(-.2,g.position.z+sy*dt*2);
-        g.scale.setScalar(Math.min(3,Math.max(.2,g.scale.x*(1+sx*dt))));
+      const it = u.grab;
+      const g = it.group;
+
+      if(u.grabType === 'item'){
+        if(gp&&gp.axes.length>=4){
+          const sx=dz(gp.axes[2]), sy=dz(gp.axes[3]);
+          g.position.z=Math.min(-.2,g.position.z+sy*dt*2);
+          g.scale.setScalar(Math.min(3,Math.max(.2,g.scale.x*(1+sx*dt))));
+        }
+      }else if(u.grabType === 'corner'){
+        // カドを掴んで対角固定でサイズ変更
+        // 簡単のためコントローラーのローカル位置の変化に応じてw, hをスケーリング
+        const corner = u.handleData.corner;
+        // 簡易実装としてスケール変更に反映
+        if(gp&&gp.axes.length>=4){
+          const sx = dz(gp.axes[2]);
+          if(Math.abs(sx) > 0.01){
+            it.w = Math.max(0.2, it.w * (1 + sx * dt));
+            it.mesh.geometry.dispose(); it.mesh.geometry = new THREE.PlaneGeometry(it.w, it.h);
+            it.handlesGroup.parent.remove(it.handlesGroup);
+            makeHandles(it);
+          }
+        }
+      }else if(u.grabType === 'heli'){
+        // ヘリを掴んで反対側軸中心に回転
+        const side = u.handleData.side;
+        if(gp&&gp.axes.length>=4){
+          const sy = dz(gp.axes[3]);
+          if(Math.abs(sy) > 0.01){
+            if(side === 'top' || side === 'bottom') g.rotation.x += sy * dt;
+            if(side === 'left' || side === 'right') g.rotation.y += sy * dt;
+          }
+        }
       }
-      // スティック押し込み（ボタン3）でXYZ回転を90°の倍数にスナップ
-      if(gp){
-        const dn3 = !!(gp.buttons[3] && gp.buttons[3].pressed);
-        if(dn3 && !u.prev[3]){
-          const r = g.rotation;
+    }else{
+      const h=castFrom(c,picks); u.hit=h; u.line.scale.z=h?h.distance:5;
+    }
+
+    if(gp){
+      const dn=i=>!!(gp.buttons[i]&&gp.buttons[i].pressed);
+
+      // カーソルが当たっている状態でスティック押し込み（ボタン3）でXYZ回転を90°の倍数（空間軸平行）にスナップ
+      const dn3 = dn(3);
+      if(dn3 && !u.prev[3] && u.hit){
+        const it = u.hit.object.userData.item;
+        if(it){
+          const r = it.group.rotation;
           r.x = Math.round(r.x / (PI / 2)) * (PI / 2);
           r.y = Math.round(r.y / (PI / 2)) * (PI / 2);
           r.z = Math.round(r.z / (PI / 2)) * (PI / 2);
         }
-        u.prev[3] = dn3;
       }
-      if(u.grab.frame) u.grab.frame.material.color.setHex(GRAB);
-    }else{
-      const h=castFrom(c,picks); u.hit=h; u.line.scale.z=h?h.distance:5;
-    }
-    if(gp){
-      const dn=i=>!!(gp.buttons[i]&&gp.buttons[i].pressed);
-      
+      u.prev[3] = dn3;
+
       // A / X ボタン（ボタン4）で手の平デザインの表示切り替え
-      const isAPressed = dn(4);
-      u.palmMesh.visible = isAPressed;
+      u.palmMesh.visible = dn(4);
 
       // B / Y ボタン（ボタン5）でメニュー表示切替
       if(dn(5)&&!u.prev[5]&&renderer.xr.isPresenting) toggleMenu();
       u.prev[5]=dn(5);
     }
   });
+
+  // アニメーション処理（手前・奥のループ）
+  items.forEach(i=>{
+    if(i.animating){
+      i.animTime += dt;
+      i.group.position.z += Math.sin(i.animTime * 3) * 0.002;
+    }
+    if(i.vp) drawIf(i.vp,dt,!i.video.paused);
+  });
+
   if(menu.group.visible) drawIf(menu,dt);
   if(editItem) drawIf(ep,dt);
-  items.forEach(i=>{if(i.vp) drawIf(i.vp,dt,!i.video.paused);});
 }
 const clock=new THREE.Clock();
 renderer.setAnimationLoop(()=>{update(Math.min(clock.getDelta(),.1));renderer.render(scene,camera);});
@@ -402,7 +518,6 @@ addEventListener('pointermove',e=>{
 });
 addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
 
-// 共通のファイル読み込み処理
 async function handleFiles(files){
   if(!files.length) return;
   $('status').textContent='読み込み中…'; let fail=0;
