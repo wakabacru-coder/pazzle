@@ -41,10 +41,10 @@ b{color:var(--text)}
   <div class="row"><button id="relayout">並べ直す</button><button id="clear">すべて削除</button></div>
   <p><b>コントローラー操作（没入中）</b></p>
   <ul>
-    <li><b>トリガー長押し</b>：掴んで移動・変形（ヘリは高速回転せず安定動作）</li>
-    <li><b>A / X ボタン</b>：プリセットメニュー開閉（ダブルクリックで一括アニメ再生）</li>
+    <li><b>トリガー長押し</b>：掴んで移動・変形</li>
+    <li><b>A / X ボタン</b>：プリセットパネルの表示／閉じる</li>
+    <li><b>グリップトリガー（中指）</b>：全画像一括アニメーションの再生／停止</li>
     <li><b>B / Y ボタン</b>：メインメニュー開閉</li>
-    <li><b>中指トリガー</b>：単一画像のアニメーションON/OFF</li>
   </ul>
 </div>
 
@@ -65,7 +65,7 @@ renderer.xr.setReferenceSpaceType('local-floor');
 document.body.prepend(renderer.domElement);
 const grid = new THREE.GridHelper(12,24,0x30363d,0x1c2128); scene.add(grid);
 
-// ---- 高度な多層ピンク官能フィルターシェーダー ----
+// ---- ピンク官能フィルターシェーダー ----
 const VS = 'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}';
 const FS = `
 uniform sampler2D map;
@@ -151,7 +151,7 @@ function applySlider(p,c,uv){
   c.set(v); p.dirty=true;
 }
 
-// ---- 安全なカメラ位置・向き取得関数（フリーズ防止） ----
+// カメラ位置・向き取得関数
 const v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
 function getCameraPositionAndDirection(posOut, dirOut){
   if(renderer.xr.isPresenting){
@@ -238,14 +238,10 @@ function getCornerLocalPos(cornerName, w, h){
 
 // ---- 画像・動画アイテム ----
 const items=[]; let editItem=null;
-const speedOptions = [0.5, 1, 2, 3, 5];
 
 function makeItem(tex,w,h,video){
   const mat=new THREE.ShaderMaterial({
-    uniforms:{
-      map:{value:tex},
-      filterIntensity:{value:0.0}
-    },
+    uniforms:{ map:{value:tex}, filterIntensity:{value:0.0} },
     vertexShader:VS, fragmentShader:FS, side:THREE.DoubleSide
   });
   const group=new THREE.Group();
@@ -253,11 +249,11 @@ function makeItem(tex,w,h,video){
   group.add(mesh); scene.add(group);
 
   const it={
-    group, mesh, tex, mat, u:mat.uniforms, w, h, video:video||null, vp:null,
-    animating: false, animTime: 0, animDepth: 2.0, animSpeedIdx: 1,
-    orbitAnimating: false, orbitAngle: 0, orbitRadius: 2.5,
+    group, mesh, tex, mat, u:mat.uniforms, w, h, initialW: w, initialH: h, video:video||null, vp:null,
+    animating: false, animTime: 0, animDepth: 2.0, animSpeed: 1.0,
+    orbitAnimating: false, orbitAngle: 0, orbitRadius: 2.5, orbitSpeed: 1.0,
     basePos: new THREE.Vector3(),
-    animDir: new THREE.Vector3(0,0,-1)
+    animDir: new THREE.Vector3(0,0,1) // プリセット1のアニメーションは手前方向（+Z）
   };
 
   mesh.userData.item=it;
@@ -320,81 +316,109 @@ function layout(){
 }
 function updateCount(){ $('count').textContent=items.length; }
 
-// ---- プリセット配置 ----
-let currentPresetMode = 'none';
-let isAllDepthAnimating = false;
-let isAllCircleAnimating = false;
+// ---- プリセット状態管理 ----
+let currentPresetMode = 'none'; // 'preset1' または 'preset2'
+let isPreset1Animating = false;
+let isPreset2Animating = false;
 
-function applyPreset1_Depth(){
-  currentPresetMode = 'depth';
-  isAllDepthAnimating = false;
-  isAllCircleAnimating = false;
-  const startZ = -1.2, stepZ = -0.8;
+// プリセットパラメータグローバル値
+let globalScale = 1.0;
+let preset1DepthLimit = 3.0; // 手前アニメ移動限度（最大10m）
+let preset1Speed = 1.0;      // 0.5〜10.0倍
+let preset1Spacing = 0.8;    // 奥へ伸びる間隔
+
+let preset2Scale = 1.0;
+let preset2Speed = 1.0;      // 0.5〜10.0倍
+
+function updatePreset1Layout(){
+  const startZ = -1.2;
   items.forEach((it, idx) => {
     scene.attach(it.group);
-    it.group.scale.set(1,1,1);
-    it.group.position.set(0, 1.5, startZ + idx * stepZ);
+    // 全画像のサイズ一括変更
+    const aspect = it.initialW / it.initialH;
+    it.w = 0.7 * globalScale * aspect;
+    it.h = 0.7 * globalScale;
+    it.mesh.geometry.dispose();
+    it.mesh.geometry = new THREE.PlaneGeometry(it.w, it.h);
+    makeHandles(it);
+
+    it.group.position.set(0, 1.5, startZ - idx * preset1Spacing);
     it.group.rotation.set(0,0,0);
     it.basePos.copy(it.group.position);
-    it.animating = false;
-    it.orbitAnimating = false;
+    it.animDepth = preset1DepthLimit;
+    it.animSpeed = preset1Speed;
+    it.animDir.set(0, 0, 1); // 元の位置から「手前」方向へ移動
   });
 }
 
-function applyPreset2_Circle(){
-  currentPresetMode = 'circle';
-  isAllDepthAnimating = false;
-  isAllCircleAnimating = false;
+function updatePreset2Layout(){
   const R = 2.5, total = items.length;
   items.forEach((it, idx) => {
     scene.attach(it.group);
-    it.group.scale.set(1,1,1);
-    const angle = (idx / total) * 2 * PI;
+    const aspect = it.initialW / it.initialH;
+    it.w = 0.7 * preset2Scale * aspect;
+    it.h = 0.7 * preset2Scale;
+    it.mesh.geometry.dispose();
+    it.mesh.geometry = new THREE.PlaneGeometry(it.w, it.h);
+    makeHandles(it);
+
+    const angle = (idx / Math.max(1, total)) * 2 * PI;
     it.orbitAngle = angle;
     it.orbitRadius = R;
+    it.orbitSpeed = preset2Speed;
     it.group.position.set(R * Math.sin(angle), 1.5, -R * Math.cos(angle));
     it.group.lookAt(0, 1.5, 0);
     it.basePos.copy(it.group.position);
-    it.animating = false;
-    it.orbitAnimating = false;
   });
 }
 
-function togglePresetAnimation(){
-  if(currentPresetMode === 'depth'){
-    isAllDepthAnimating = !isAllDepthAnimating;
+function applyPreset1(){
+  currentPresetMode = 'preset1';
+  isPreset1Animating = false;
+  isPreset2Animating = false;
+  items.forEach(it => { it.animating = false; it.orbitAnimating = false; });
+  updatePreset1Layout();
+  buildPresetControls();
+}
+
+function applyPreset2(){
+  currentPresetMode = 'preset2';
+  isPreset1Animating = false;
+  isPreset2Animating = false;
+  items.forEach(it => { it.animating = false; it.orbitAnimating = false; });
+  updatePreset2Layout();
+  buildPresetControls();
+}
+
+function togglePresetAnimationByGrip(){
+  if(currentPresetMode === 'preset1'){
+    isPreset1Animating = !isPreset1Animating;
     items.forEach(it => {
-      it.animating = isAllDepthAnimating;
-      if(isAllDepthAnimating){
+      it.animating = isPreset1Animating;
+      if(isPreset1Animating){
         it.basePos.copy(it.group.position);
-        it.animDir.set(0, 0, -1);
         it.animTime = 0;
       } else {
         it.group.position.copy(it.basePos);
       }
     });
-  } else if(currentPresetMode === 'circle'){
-    isAllCircleAnimating = !isAllCircleAnimating;
+  } else if(currentPresetMode === 'preset2'){
+    isPreset2Animating = !isPreset2Animating;
     items.forEach(it => {
-      it.orbitAnimating = isAllCircleAnimating;
+      it.orbitAnimating = isPreset2Animating;
     });
   }
 }
 
 // ---- 編集パネル ----
-const snapSld=(y,label,get,set)=>({t:'sld',x:20,y,w:440,h:65,label,snap:true,get,set});
 const ep=makePanel(.85,.68,[
-  snapSld(20,'ピンク官能フィルター',()=>editItem?editItem.u.filterIntensity.value:0,v=>{if(editItem)editItem.u.filterIntensity.value=v;}),
-  {t:'sld',x:20,y:110,w:280,h:60,label:()=>'アニメ奥行き: '+(editItem?(editItem.animDepth).toFixed(1)+'m':''),get:()=>editItem?editItem.animDepth/10.0:0.2,set:v=>{if(editItem)editItem.animDepth=v*10.0;}},
-  {t:'btn',x:315,y:110,w:145,h:55,label:()=>'速度: '+(editItem?speedOptions[editItem.animSpeedIdx]:1)+'x',act:()=>{
-    if(!editItem) return;
-    editItem.animSpeedIdx = (editItem.animSpeedIdx + 1) % speedOptions.length;
-  }},
+  {t:'sld',x:20,y:20,w:440,h:65,label:'ピンク官能フィルター',snap:true,get:()=>editItem?editItem.u.filterIntensity.value:0,set:v=>{if(editItem)editItem.u.filterIntensity.value=v;}},
+  {t:'sld',x:20,y:110,w:440,h:60,label:()=>'アニメ奥行き: '+(editItem?(editItem.animDepth).toFixed(1)+'m':''),get:()=>editItem?editItem.animDepth/10.0:0.2,set:v=>{if(editItem)editItem.animDepth=v*10.0;}},
   {t:'btn',x:20,y:195,w:440,h:55,label:'フィルターリセット',act:()=>{
     if(!editItem)return;
     editItem.u.filterIntensity.value = 0;
     if(editItem.animating){ editItem.animating=false; editItem.group.position.copy(editItem.basePos); }
-    editItem.animDepth=2.0; editItem.animSpeedIdx=1;
+    editItem.animDepth=2.0;
   }},
   {t:'btn',x:20,y:270,w:440,h:50,label:'画像を削除',act:()=>{const it=editItem;exitEdit();removeItem(it);}}
 ]);
@@ -405,16 +429,43 @@ function enterEdit(it){
 }
 function exitEdit(){ if(editItem) editItem.group.remove(ep.group); editItem=null; }
 
-// ---- プリセットメニュー ----
-const presetMenu = makePanel(.8,.4,[
-  {t:'txt',x:20,y:10,w:400,h:35,label:'配置プリセット (Aダブルクリックで再生)',size:22},
-  {t:'btn',x:20,y:60,w:440,h:65,label:'1. 奥行き手前〜奥へ整列',act:()=>{ applyPreset1_Depth(); presetMenu.group.visible = false; }},
-  {t:'btn',x:20,y:140,w:440,h:65,label:'2. 周囲を囲むサラウンド円形',act:()=>{ applyPreset2_Circle(); presetMenu.group.visible = false; }}
-]);
+// ---- プリセットパネル（動的コントロール切り替え） ----
+let presetMenuControls = [];
+const presetMenu = makePanel(.9, .75, []);
 presetMenu.group.visible = false; scene.add(presetMenu.group);
 
-function togglePresetMenu(){
-  const pm = presetMenu.group; pm.visible = !pm.visible; if(!pm.visible) return;
+function buildPresetControls(){
+  presetMenuControls.length = 0;
+  presetMenuControls.push(
+    {t:'txt',x:20,y:10,w:500,h:35,label:'プリセット選択 & パラメータ調整',size:24},
+    {t:'btn',x:20,y:55,w:240,h:55,label:'1. 手前〜奥整列',on:()=>currentPresetMode==='preset1',act:()=>applyPreset1()},
+    {t:'btn',x:270,y:55,w:240,h:55,label:'2. サラウンド円形',on:()=>currentPresetMode==='preset2',act:()=>applyPreset2()}
+  );
+
+  if(currentPresetMode === 'preset1'){
+    presetMenuControls.push(
+      {t:'sld',x:20,y:125,w:490,h:55,label:()=>'全画像サイズ: '+(globalScale).toFixed(2)+'x',get:()=>(globalScale-0.2)/2.8,set:v=>{globalScale=0.2+v*2.8; updatePreset1Layout();}},
+      {t:'sld',x:20,y:190,w:490,h:55,label:()=>'手前アニメ移動限度: '+(preset1DepthLimit).toFixed(1)+'m',get:()=>preset1DepthLimit/10.0,set:v=>{preset1DepthLimit=Math.max(0.1, v*10.0); updatePreset1Layout();}},
+      {t:'sld',x:20,y:255,w:490,h:55,label:()=>'アニメ速度: '+(preset1Speed).toFixed(1)+'x',get:()=>(preset1Speed-0.5)/9.5,set:v=>{preset1Speed=0.5+v*9.5; updatePreset1Layout();}},
+      {t:'sld',x:20,y:320,w:490,h:55,label:()=>'奥への画像間隔: '+(preset1Spacing).toFixed(2)+'m',get:()=>(preset1Spacing-0.1)/2.9,set:v=>{preset1Spacing=0.1+v*2.9; updatePreset1Layout();}}
+    );
+  } else if(currentPresetMode === 'preset2'){
+    presetMenuControls.push(
+      {t:'sld',x:20,y:140,w:490,h:65,label:()=>'全画像サイズ: '+(preset2Scale).toFixed(2)+'x',get:()=>(preset2Scale-0.2)/2.8,set:v=>{preset2Scale=0.2+v*2.8; updatePreset2Layout();}},
+      {t:'sld',x:20,y:230,w:490,h:65,label:()=>'旋回速度: '+(preset2Speed).toFixed(1)+'x',get:()=>(preset2Speed-0.5)/9.5,set:v=>{preset2Speed=0.5+v*9.5; updatePreset2Layout();}}
+    );
+  }
+  presetMenu.controls = presetMenuControls;
+  presetMenu.dirty = true;
+}
+
+// 初期コントロール構築
+buildPresetControls();
+
+function togglePresetPanel(){
+  const pm = presetMenu.group;
+  pm.visible = !pm.visible;
+  if(!pm.visible) return;
   getCameraPositionAndDirection(v1, v2);
   scene.attach(pm); pm.scale.set(1,1,1);
   pm.position.copy(v1).addScaledVector(v2, 1.1);
@@ -510,7 +561,6 @@ function toggleMenu(){
 // ---- コントローラー制御 ----
 const controllers=[], ray=new THREE.Raycaster(), tm=new THREE.Matrix4(), wp=new THREE.Vector3();
 let lastClick={item:null,t:0};
-let lastABtnTime = 0;
 const lineGeo=new THREE.CylinderGeometry(.004,.004,1,6); lineGeo.rotateX(PI/2); lineGeo.translate(0,0,-.5);
 
 for(let i=0;i<2;i++){
@@ -684,7 +734,6 @@ function update(dt){
         updateHandleVisibility(it, u.handleObj);
 
       }else if(u.grabType === 'heli'){
-        // ヘリ操作：変位量を厳格にクランプして高速回転（暴走）を根本防止
         const side = u.handleObj.userData.side;
         const h = castFrom(c, [it.mesh]);
         let currentRayPos = new THREE.Vector3();
@@ -696,8 +745,6 @@ function update(dt){
 
         const rayDelta = currentRayPos.clone().sub(u.grabRayIntersection);
         u.grabRayIntersection.copy(currentRayPos);
-
-        // 変化量の上限を設けて爆発的回転を絶対防止
         rayDelta.clampScalar(-0.08, 0.08);
 
         const deltaRot = (rayDelta.x + rayDelta.y) * 1.5;
@@ -728,22 +775,26 @@ function update(dt){
     if(gp){
       const dn=i=>!!(gp.buttons[i]&&gp.buttons[i].pressed);
 
-      // 中指トリガー（グリップボタン）でアニメーションON/OFF
+      // 中指トリガー（グリップボタン）：プリセット一括アニメーション（選択時）または単一アニメ切替
       const dn1 = dn(1);
-      if(dn1 && !u.prev[1] && u.hit){
-        const it = u.hit.object.userData.item;
-        if(it){
-          it.animating = !it.animating;
-          if(it.animating){
-            it.basePos.copy(it.group.position);
-            getCameraPositionAndDirection(v1, v2);
-            const yaw = Math.atan2(v2.x, v2.z);
-            const snappedYaw = Math.round(yaw / (PI / 2)) * (PI / 2);
-            it.animDir.set(Math.sin(snappedYaw), 0, Math.cos(snappedYaw)).normalize();
-            it.animDir.negate();
-            it.animTime = 0;
-          } else {
-            it.group.position.copy(it.basePos);
+      if(dn1 && !u.prev[1]){
+        if(currentPresetMode !== 'none'){
+          togglePresetAnimationByGrip();
+        } else if(u.hit){
+          const it = u.hit.object.userData.item;
+          if(it){
+            it.animating = !it.animating;
+            if(it.animating){
+              it.basePos.copy(it.group.position);
+              getCameraPositionAndDirection(v1, v2);
+              const yaw = Math.atan2(v2.x, v2.z);
+              const snappedYaw = Math.round(yaw / (PI / 2)) * (PI / 2);
+              it.animDir.set(Math.sin(snappedYaw), 0, Math.cos(snappedYaw)).normalize();
+              it.animDir.negate();
+              it.animTime = 0;
+            } else {
+              it.group.position.copy(it.basePos);
+            }
           }
         }
       }
@@ -762,17 +813,10 @@ function update(dt){
       }
       u.prev[3] = dn3;
 
-      // A / X ボタン（ボタン4）：単押しでプリセットメニュー開閉／ダブルクリックで再生
+      // A / X ボタン（ボタン4）：プリセットパネルの表示/非表示（トグル）
       const dn4 = dn(4);
       if(dn4 && !u.prev[4]){
-        const now = performance.now();
-        if(now - lastABtnTime < 400){
-          togglePresetAnimation();
-          lastABtnTime = 0;
-        } else {
-          if(renderer.xr.isPresenting) togglePresetMenu();
-          lastABtnTime = now;
-        }
+        if(renderer.xr.isPresenting) togglePresetPanel();
       }
       u.prev[4] = dn4;
 
@@ -788,12 +832,12 @@ function update(dt){
   // アニメーション計算
   items.forEach(i=>{
     if(i.animating){
-      const spd = speedOptions[i.animSpeedIdx];
+      const spd = i.animSpeed || 1.0;
       i.animTime += dt * spd;
       const d = (Math.sin(i.animTime * 2 - PI/2) + 1) * 0.5 * i.animDepth;
       i.group.position.copy(i.basePos).addScaledVector(i.animDir, d);
     } else if(i.orbitAnimating){
-      const spd = speedOptions[i.animSpeedIdx];
+      const spd = i.orbitSpeed || 1.0;
       i.orbitAngle += dt * 0.5 * spd;
       const R = i.orbitRadius || 2.5;
       i.group.position.set(R * Math.sin(i.orbitAngle), 1.5, -R * Math.cos(i.orbitAngle));
