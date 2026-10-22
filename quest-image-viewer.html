@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Quest 画像ビューワー</title>
+<style>
+:root{--bg:#f3f4f7;--panel:rgba(255,255,255,.94);--text:#15181d;--sub:#5b6573;--accent:#2f6df6;--border:#d5d9e0;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0d1117;--panel:rgba(22,27,34,.94);--text:#e6edf3;--sub:#9aa7b4;--accent:#4d8dff;--border:#30363d}}
+:root[data-theme="dark"]{--bg:#0d1117;--panel:rgba(22,27,34,.94);--text:#e6edf3;--sub:#9aa7b4;--accent:#4d8dff;--border:#30363d}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;overflow:hidden}
+canvas{position:fixed;inset:0;width:100%;height:100%;touch-action:none}
+#panel{position:fixed;top:max(16px,env(safe-area-inset-top,0px));left:16px;z-index:2;width:min(400px,calc(100% - 32px));max-height:calc(100% - 32px);overflow-y:auto;background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:16px 18px}
+h1{font-size:18px;margin:0 0 4px}
+p{margin:6px 0;font-size:13px;line-height:1.6;color:var(--sub)}
+.row{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+button,label.btn{font:inherit;font-size:14px;padding:10px 14px;border-radius:10px;border:1px solid var(--border);background:transparent;color:var(--text);cursor:pointer}
+.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button:disabled{opacity:.45;cursor:not-allowed}
+input[type=file]{display:none}
+#count{font-weight:600;color:var(--text)}
+ul{margin:6px 0 0;padding-left:18px;font-size:12.5px;line-height:1.7;color:var(--sub)}
+b{color:var(--text)}
+</style>
+</head>
+<body>
+<div id="panel">
+  <h1>Quest 画像ビューワー</h1>
+  <p>画像・動画を選んでから没入モードに入ると、周囲の空間に並べて閲覧・操作できます。</p>
+  <div class="row">
+    <label class="btn primary" for="file">画像・動画を選択…</label>
+    <input id="file" type="file" accept="image/*,video/*" multiple>
+    <label class="btn" for="bgfile">背景を選択…</label>
+    <input id="bgfile" type="file" accept="image/*,video/*">
+  </div>
+  <div class="row">
+    <button id="vr" disabled>VRで表示</button>
+    <button id="ar" disabled>パススルーで表示</button>
+  </div>
+  <p>読み込み済み: <span id="count">0</span> 枚　<span id="status"></span></p>
+  <div class="row"><button id="relayout">並べ直す</button><button id="clear">すべて削除</button></div>
+  <p><b>コントローラー操作（没入中）</b></p>
+  <ul>
+    <li><b>トリガー長押し</b>：掴んで移動・回転</li>
+    <li><b>掴み中のスティック</b>：上下＝遠近、左右＝拡大縮小</li>
+    <li><b>素早くダブルタップ</b>：編集モード（色相・彩度・明るさ・コントラスト）</li>
+    <li><b>動画をタップ</b>：再生／停止（下部にシークバーと音量）</li>
+    <li><b>B / Y ボタン</b>：メニューの表示／非表示</li>
+    <li><b>A / X ボタン</b>：弧状に並べ直す</li>
+  </ul>
+  <p>ファイル選択は没入中は開けないため、メニューのボタンで没入を終了してから選んでください。</p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+const $ = id => document.getElementById(id);
+const PI = Math.PI, BGC = 0x0d1117, FRAME = 0x3a4350, HOVER = 0x4da3ff, GRAB = 0xffc94d, EDIT = 0xb36bff;
+const FONT = '"Noto Sans JP","Hiragino Sans","Yu Gothic",sans-serif';
+const scene = new THREE.Scene(); scene.background = new THREE.Color(BGC);
+const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.05, 80);
+camera.position.set(0,1.6,0); camera.rotation.order = 'YXZ';
+const renderer = new THREE.WebGLRenderer({antialias:true, alpha:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+document.body.prepend(renderer.domElement);
+const grid = new THREE.GridHelper(12,24,0x30363d,0x1c2128); scene.add(grid);
+
+// ---- 色調整シェーダー ----
+const VS = 'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}';
+const FS = `uniform sampler2D map;uniform float hue,sat,bri,con;varying vec2 vUv;
+void main(){vec3 c=texture2D(map,vUv).rgb;
+mat3 a=mat3(.299,.596,.211,.587,-.274,-.523,.114,-.322,.312);
+mat3 b=mat3(1.,1.,1.,.956,-.272,-1.106,.621,-.647,1.703);
+vec3 y=a*c;float cs=cos(hue),sn=sin(hue);y=vec3(y.x,y.y*cs-y.z*sn,y.y*sn+y.z*cs);c=b*y;
+float l=dot(c,vec3(.299,.587,.114));c=mix(vec3(l),c,sat);c=(c-.5)*con+.5+bri;
+gl_FragColor=vec4(clamp(c,0.,1.),1.);}`;
+
+// ---- パネル（キャンバスUI） ----
+function rr(c,x,y,w,h,r){c.beginPath();c.moveTo(x+r,y);c.arcTo(x+w,y,x+w,y+h,r);c.arcTo(x+w,y+h,x,y+h,r);c.arcTo(x,y+h,x,y,r);c.arcTo(x,y,x+w,y,r);c.closePath();}
+function makePanel(wm,hm,controls){
+  const S=600, W=Math.round(wm*S), H=Math.round(hm*S);
+  const cv=document.createElement('canvas'); cv.width=W; cv.height=H;
+  const ctx=cv.getContext('2d'), tex=new THREE.CanvasTexture(cv);
+  const mesh=new THREE.Mesh(new THREE.PlaneGeometry(wm,hm), new THREE.MeshBasicMaterial({map:tex,transparent:true}));
+  const group=new THREE.Group(); group.add(mesh);
+  const p={group,mesh,controls,W,H,wm,hm,owner:null,dirty:true,acc:0,draw(){
+    ctx.clearRect(0,0,W,H); ctx.fillStyle='rgba(22,27,34,.96)'; rr(ctx,0,0,W,H,24); ctx.fill();
+    ctx.textBaseline='middle';
+    for(const c of controls){
+      const lab=typeof c.label==='function'?c.label():(c.label||'');
+      if(c.t==='btn'){
+        ctx.fillStyle=c.on&&c.on()?'#2f6df6':'#2a313c'; rr(ctx,c.x,c.y,c.w,c.h,12); ctx.fill();
+        ctx.fillStyle='#fff'; ctx.font='26px '+FONT; ctx.textAlign='center'; ctx.fillText(lab,c.x+c.w/2,c.y+c.h/2);
+      }else if(c.t==='txt'){
+        ctx.fillStyle='#9aa7b4'; ctx.font=(c.size||24)+'px '+FONT; ctx.textAlign='left'; ctx.fillText(lab,c.x,c.y+c.h/2);
+      }else{
+        const v=Math.min(1,Math.max(0,c.get()||0)), ty=lab?c.y+c.h-16:c.y+c.h/2;
+        if(lab){ctx.fillStyle='#9aa7b4';ctx.font='24px '+FONT;ctx.textAlign='left';ctx.fillText(lab,c.x,c.y+14);}
+        ctx.fillStyle='#3a4350'; rr(ctx,c.x,ty-5,c.w,10,5); ctx.fill();
+        ctx.fillStyle='#4d8dff'; rr(ctx,c.x,ty-5,Math.max(10,c.w*v),10,5); ctx.fill();
+        ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(c.x+c.w*v,ty,14,0,2*PI); ctx.fill();
+      }
+    }
+    tex.needsUpdate=true; p.dirty=false;
+  }};
+  mesh.userData.panel=p; return p;
+}
+function ctlAt(p,uv){
+  const x=uv.x*p.W, y=(1-uv.y)*p.H;
+  return p.controls.find(c=>c.t!=='txt'&&x>=c.x&&x<=c.x+c.w&&y>=c.y&&y<=c.y+c.h);
+}
+function applySlider(p,c,uv){
+  let v=Math.min(1,Math.max(0,(uv.x*p.W-c.x)/c.w));
+  if(c.snap&&Math.abs(v-.5)<.03) v=.5;
+  c.set(v); p.dirty=true;
+}
+
+// ---- 画像・動画アイテム ----
+const items=[]; let editItem=null;
+function makeItem(tex,w,h,video){
+  const mat=new THREE.ShaderMaterial({uniforms:{map:{value:tex},hue:{value:0},sat:{value:1},bri:{value:0},con:{value:1}},vertexShader:VS,fragmentShader:FS,side:THREE.DoubleSide});
+  const group=new THREE.Group();
+  const mesh=new THREE.Mesh(new THREE.PlaneGeometry(w,h),mat);
+  const frame=new THREE.Mesh(new THREE.PlaneGeometry(w+.04,h+.04),new THREE.MeshBasicMaterial({color:FRAME,side:THREE.DoubleSide}));
+  frame.position.z=-.003; group.add(frame,mesh); scene.add(group);
+  const it={group,mesh,frame,tex,mat,u:mat.uniforms,w,h,video:video||null,vp:null};
+  mesh.userData.item=it;
+  if(video) it.vp=makeVideoPanel(it);
+  items.push(it); return it;
+}
+async function addImage(file){
+  const bmp=await createImageBitmap(file);
+  const s=Math.min(1,2048/Math.max(bmp.width,bmp.height));
+  const c=document.createElement('canvas'); c.width=Math.max(1,Math.round(bmp.width*s)); c.height=Math.max(1,Math.round(bmp.height*s));
+  c.getContext('2d').drawImage(bmp,0,0,c.width,c.height); if(bmp.close) bmp.close();
+  const tex=new THREE.CanvasTexture(c); tex.anisotropy=4;
+  makeItem(tex,.7*c.width/c.height,.7);
+}
+function addVideo(file){
+  return new Promise((res,rej)=>{
+    const v=document.createElement('video'), url=URL.createObjectURL(file);
+    v.src=url; v.playsInline=true; v.preload='auto'; v.volume=.8;
+    v.onerror=()=>rej(new Error('video'));
+    v.onloadedmetadata=()=>{
+      const tex=new THREE.VideoTexture(v); tex.minFilter=tex.magFilter=THREE.LinearFilter;
+      const it=makeItem(tex,.7*v.videoWidth/v.videoHeight,.7,v); it.url=url; v.currentTime=.01; res();
+    };
+  });
+}
+function toggle(v){ v.paused?v.play().catch(()=>{}):v.pause(); }
+function makeVideoPanel(it){
+  const v=it.video, wm=Math.max(it.w,.6), W=wm*600;
+  const p=makePanel(wm,.1,[
+    {t:'btn',x:8,y:8,w:56,h:44,label:()=>v.paused?'▶':'❚❚',act:()=>toggle(v)},
+    {t:'sld',x:76,y:8,w:W-76-170,h:44,label:'',get:()=>v.duration?v.currentTime/v.duration:0,set:x=>{if(v.duration)v.currentTime=x*v.duration;}},
+    {t:'btn',x:W-86,y:8,w:0,h:0,label:'',act:()=>{}},
+    {t:'btn',x:W-150,y:8,w:44,h:44,label:()=>v.muted||v.volume===0?'×':'♪',act:()=>{v.muted=!v.muted;}},
+    {t:'sld',x:W-98,y:8,w:88,h:44,label:'',get:()=>v.muted?0:v.volume,set:x=>{v.muted=false;v.volume=x;}}
+  ]);
+  p.controls.splice(2,1);
+  p.group.position.set(0,-(it.h/2+.02+.05),.004); p.owner=it; it.group.add(p.group); return p;
+}
+function removeItem(it){
+  controllers.forEach(c=>{if(c.userData.grab===it)c.userData.grab=null;});
+  if(editItem===it) exitEdit();
+  if(it.video){it.video.pause();it.video.removeAttribute('src');it.video.load();URL.revokeObjectURL(it.url);}
+  it.group.parent&&it.group.parent.remove(it.group); it.tex.dispose();
+  const i=items.indexOf(it); if(i>=0) items.splice(i,1); updateCount();
+}
+function layout(){
+  const R=2.2, gap=.14, per=5, rows=[];
+  for(let i=0;i<items.length;i+=per) rows.push(items.slice(i,i+per));
+  rows.forEach((row,ri)=>{
+    const y=1.5-(ri-(rows.length-1)/2)*1.05;
+    let a=-(row.reduce((s,it)=>s+(it.w+gap)/R,0)-gap/R)/2;
+    row.forEach(it=>{
+      const th=a+it.w/R/2; a+=(it.w+gap)/R;
+      scene.attach(it.group); it.group.scale.set(1,1,1);
+      it.group.position.set(R*Math.sin(th),y,-R*Math.cos(th)); it.group.lookAt(0,y,0);
+    });
+  });
+}
+function updateCount(){ $('count').textContent=items.length; }
+
+// ---- 編集パネル ----
+const snapSld=(y,label,get,set)=>({t:'sld',x:20,y,w:440,h:70,label,snap:true,get,set});
+const ep=makePanel(.8,.72,[
+  snapSld(14,'色相',()=>editItem?editItem.u.hue.value/(2*PI)+.5:.5,v=>{editItem.u.hue.value=(v-.5)*2*PI;}),
+  snapSld(94,'彩度',()=>editItem?editItem.u.sat.value/2:.5,v=>{editItem.u.sat.value=v*2;}),
+  snapSld(174,'明るさ',()=>editItem?editItem.u.bri.value+.5:.5,v=>{editItem.u.bri.value=v-.5;}),
+  snapSld(254,'コントラスト',()=>editItem?editItem.u.con.value-.5:.5,v=>{editItem.u.con.value=v+.5;}),
+  {t:'btn',x:20,y:350,w:140,h:60,label:'リセット',act:()=>{const u=editItem.u;u.hue.value=0;u.sat.value=1;u.bri.value=0;u.con.value=1;}},
+  {t:'btn',x:170,y:350,w:140,h:60,label:'閉じる',act:()=>exitEdit()},
+  {t:'btn',x:320,y:350,w:140,h:60,label:'削除',act:()=>{const it=editItem;exitEdit();removeItem(it);}}
+]);
+function enterEdit(it){
+  exitEdit(); editItem=it; ep.owner=it; it.group.add(ep.group);
+  ep.group.position.set(it.w/2+.04+ep.wm/2,0,.01); ep.dirty=true;
+}
+function exitEdit(){ if(editItem) editItem.group.remove(ep.group); editItem=null; }
+
+// ---- 背景（360°/180°） ----
+let bgMode='none', bgTex=null, bgVideo=null, bgName='';
+const bgMesh=new THREE.Mesh(new THREE.BufferGeometry(),new THREE.MeshBasicMaterial());
+bgMesh.position.y=1.6; bgMesh.renderOrder=-1; bgMesh.frustumCulled=false; bgMesh.visible=false; scene.add(bgMesh);
+function setBgMode(m){
+  bgMode=m; bgMesh.geometry.dispose();
+  const g=m==='180'?new THREE.SphereGeometry(30,64,32,PI,PI):new THREE.SphereGeometry(30,64,32);
+  g.scale(-1,1,1); bgMesh.geometry=g; applyMode(); menu.dirty=true;
+}
+async function loadBg(file){
+  if(bgTex) bgTex.dispose();
+  if(bgVideo){bgVideo.pause();bgVideo=null;}
+  if(file.type.startsWith('video')){
+    const v=document.createElement('video'); v.src=URL.createObjectURL(file); v.loop=true; v.playsInline=true; bgVideo=v;
+    bgTex=new THREE.VideoTexture(v); bgTex.minFilter=bgTex.magFilter=THREE.LinearFilter;
+    v.play().catch(()=>{v.muted=true;v.play().catch(()=>{});});
+  }else{
+    const bmp=await createImageBitmap(file), s=Math.min(1,4096/Math.max(bmp.width,bmp.height));
+    const c=document.createElement('canvas'); c.width=Math.round(bmp.width*s); c.height=Math.round(bmp.height*s);
+    c.getContext('2d').drawImage(bmp,0,0,c.width,c.height); if(bmp.close) bmp.close();
+    bgTex=new THREE.CanvasTexture(c);
+  }
+  bgMesh.material.map=bgTex; bgMesh.material.needsUpdate=true; bgName=file.name;
+  setBgMode(bgMode==='none'?'360':bgMode);
+}
+
+// ---- XRセッション ----
+let session=null, mode='vr', pending=null, arOK=false;
+function applyMode(){
+  const ar=mode==='ar'&&!!session;
+  scene.background=ar?null:new THREE.Color(BGC); renderer.setClearAlpha(ar?0:1);
+  grid.visible=!ar; bgMesh.visible=!ar&&bgMode!=='none'&&!!bgTex; menu.dirty=true;
+}
+async function startXR(m){
+  const s=await navigator.xr.requestSession(m==='ar'?'immersive-ar':'immersive-vr',{optionalFeatures:['local-floor','bounded-floor']});
+  session=s; mode=m; renderer.xr.setSession(s); applyMode(); $('panel').style.display='none';
+  s.addEventListener('end',()=>{
+    session=null; menu.group.visible=false; exitEdit(); applyMode();
+    const p=pending; pending=null;
+    if(p) startXR(p).catch(()=>{$('panel').style.display='';mode=p;$('status').textContent='ボタンを押して '+(p==='ar'?'パススルー':'VR')+' に切り替えてください';});
+    else $('panel').style.display='';
+  });
+}
+function endXR(msg){ if(msg) $('status').textContent=msg; pending=null; session&&session.end(); }
+
+// ---- メニュー ----
+const bgBtn=(x,m,l)=>({t:'btn',x,y:262,w:160,h:64,label:l,on:()=>bgMode===m,act:()=>setBgMode(m)});
+const menu=makePanel(.9,.8,[
+  {t:'txt',x:20,y:12,w:300,h:40,label:'メニュー',size:30},
+  {t:'btn',x:20,y:70,w:245,h:64,label:'没入モード解除',act:()=>endXR()},
+  {t:'btn',x:275,y:70,w:245,h:64,label:'画像・動画選択',act:()=>endXR('画像・動画を選択してください')},
+  {t:'btn',x:20,y:150,w:500,h:64,label:()=>'パススルー：'+(mode==='ar'?'ON':'OFF'),on:()=>mode==='ar',act:()=>{
+    if(!arOK&&mode!=='ar'){return;}
+    pending=mode==='ar'?'vr':'ar'; session&&session.end();}},
+  {t:'txt',x:20,y:226,w:400,h:30,label:'背景',size:24},
+  bgBtn(20,'none','なし'),bgBtn(190,'360','360°'),bgBtn(360,'180','180°'),
+  {t:'btn',x:20,y:346,w:500,h:64,label:'背景ファイル選択',act:()=>endXR('背景の画像・動画を選択してください')},
+  {t:'txt',x:20,y:420,w:500,h:40,label:()=>'背景: '+(bgName||'未選択')+(mode==='ar'?'（パススルー中は非表示）':''),size:22}
+]);
+menu.group.visible=false; scene.add(menu.group);
+const v1=new THREE.Vector3(), v2=new THREE.Vector3();
+function toggleMenu(){
+  const m=menu.group; m.visible=!m.visible; if(!m.visible) return;
+  const xc=renderer.xr.getCamera(camera); xc.getWorldPosition(v1); xc.getWorldDirection(v2); v2.y=0;
+  if(v2.lengthSq()<1e-4) v2.set(0,0,-1); v2.normalize();
+  scene.attach(m); m.scale.set(1,1,1); m.position.copy(v1).addScaledVector(v2,1.1); m.position.y=v1.y-.1;
+  m.lookAt(v1.x,m.position.y,v1.z); menu.dirty=true;
+}
+
+// ---- コントローラー ----
+const controllers=[], ray=new THREE.Raycaster(), tm=new THREE.Matrix4(), wp=new THREE.Vector3();
+let lastClick={item:null,t:0};
+const lineGeo=new THREE.CylinderGeometry(.004,.004,1,6); lineGeo.rotateX(PI/2); lineGeo.translate(0,0,-.5);
+for(let i=0;i<2;i++){
+  const c=renderer.xr.getController(i);
+  const line=new THREE.Mesh(lineGeo,new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:.35,depthWrite:false}));
+  line.scale.z=5; c.add(line);
+  c.userData={hit:null,grab:null,drag:null,line,src:null,prev:[],t0:0,p0:new THREE.Vector3(),clickItem:null};
+  c.addEventListener('connected',e=>{c.userData.src=e.data;});
+  c.addEventListener('disconnected',()=>{c.userData.src=null;});
+  c.addEventListener('selectstart',()=>{
+    const u=c.userData, h=u.hit; if(!h) return;
+    const p=h.object.userData.panel, it=h.object.userData.item;
+    let target=it;
+    if(p){
+      const ct=ctlAt(p,h.uv);
+      if(ct&&ct.t==='btn'){ct.act();p.dirty=true;return;}
+      if(ct&&ct.t==='sld'){u.drag={p,ctl:ct};applySlider(p,ct,h.uv);return;}
+      target=p.owner||{group:p.group};
+    }
+    if(controllers.some(o=>o.userData.grab===target)) return;
+    u.grab=target; u.clickItem=it&&!p?it:null; u.t0=performance.now(); c.getWorldPosition(u.p0);
+    c.attach(target.group);
+  });
+  c.addEventListener('selectend',()=>{
+    const u=c.userData;
+    if(u.drag){u.drag=null;return;}
+    if(!u.grab) return;
+    scene.attach(u.grab.group); u.grab=null;
+    if(u.clickItem&&performance.now()-u.t0<350&&c.getWorldPosition(wp).distanceTo(u.p0)<.05) onClick(u.clickItem);
+    u.clickItem=null;
+  });
+  scene.add(c); controllers.push(c);
+}
+function onClick(it){
+  const now=performance.now(), dbl=lastClick.item===it&&now-lastClick.t<450;
+  if(it.video){toggle(it.video);it.vp.dirty=true;}
+  if(dbl){lastClick={item:null,t:0}; if(it.video) toggle(it.video); enterEdit(it);}
+  else lastClick={item:it,t:now};
+}
+function castFrom(c,objs){
+  tm.identity().extractRotation(c.matrixWorld);
+  ray.ray.origin.setFromMatrixPosition(c.matrixWorld);
+  ray.ray.direction.set(0,0,-1).applyMatrix4(tm);
+  return ray.intersectObjects(objs,false)[0]||null;
+}
+const dz=v=>Math.abs(v)<.15?0:v;
+function drawIf(p,dt,live){
+  p.acc+=dt; if(p.dirty||(live&&p.acc>.15)){p.draw();p.acc=0;}
+}
+function update(dt){
+  items.forEach(it=>it.frame.material.color.setHex(it===editItem?EDIT:FRAME));
+  const picks=items.map(i=>i.mesh);
+  items.forEach(i=>{if(i.vp)picks.push(i.vp.mesh);});
+  if(menu.group.visible) picks.push(menu.mesh);
+  if(editItem) picks.push(ep.mesh);
+  controllers.forEach(c=>{
+    const u=c.userData, gp=u.src&&u.src.gamepad;
+    if(u.drag){
+      const h=castFrom(c,[u.drag.p.mesh]); if(h) applySlider(u.drag.p,u.drag.ctl,h.uv);
+      u.line.scale.z=h?h.distance:3;
+    }else if(u.grab){
+      u.line.scale.z=.3;
+      const g=u.grab.group;
+      if(gp&&gp.axes.length>=4){
+        const sx=dz(gp.axes[2]), sy=dz(gp.axes[3]);
+        g.position.z=Math.min(-.2,g.position.z+sy*dt*2);
+        g.scale.setScalar(Math.min(3,Math.max(.2,g.scale.x*(1+sx*dt))));
+      }
+      if(u.grab.frame) u.grab.frame.material.color.setHex(GRAB);
+    }else{
+      const h=castFrom(c,picks); u.hit=h; u.line.scale.z=h?h.distance:5;
+      const it=h&&h.object.userData.item; if(it) it.frame.material.color.setHex(HOVER);
+    }
+    if(gp){
+      const dn=i=>!!(gp.buttons[i]&&gp.buttons[i].pressed);
+      if(dn(4)&&!u.prev[4]) layout();
+      if(dn(5)&&!u.prev[5]&&renderer.xr.isPresenting) toggleMenu();
+      u.prev[4]=dn(4); u.prev[5]=dn(5);
+    }
+  });
+  if(menu.group.visible) drawIf(menu,dt);
+  if(editItem) drawIf(ep,dt);
+  items.forEach(i=>{if(i.vp) drawIf(i.vp,dt,!i.video.paused);});
+}
+const clock=new THREE.Clock();
+renderer.setAnimationLoop(()=>{update(Math.min(clock.getDelta(),.1));renderer.render(scene,camera);});
+
+// ---- 2Dビュー・UI ----
+let drag=false,lx=0,ly=0;
+renderer.domElement.addEventListener('pointerdown',e=>{drag=true;lx=e.clientX;ly=e.clientY;});
+addEventListener('pointerup',()=>drag=false);
+addEventListener('pointermove',e=>{
+  if(!drag||renderer.xr.isPresenting) return;
+  camera.rotation.y+=(e.clientX-lx)*.004;
+  camera.rotation.x=Math.max(-1.2,Math.min(1.2,camera.rotation.x+(e.clientY-ly)*.004));
+  lx=e.clientX; ly=e.clientY;
+});
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+$('file').addEventListener('change',async e=>{
+  const files=[...e.target.files]; if(!files.length) return;
+  $('status').textContent='読み込み中…'; let fail=0;
+  for(const f of files){
+    try{ f.type.startsWith('video')?await addVideo(f):await addImage(f); }catch(err){fail++;console.warn(err);}
+  }
+  layout(); updateCount();
+  $('status').textContent=fail?fail+' 件は読み込めませんでした':''; e.target.value='';
+});
+$('bgfile').addEventListener('change',async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  try{await loadBg(f);$('status').textContent='背景を設定しました';}catch(err){$('status').textContent='背景を読み込めませんでした';}
+  e.target.value='';
+});
+$('relayout').onclick=layout;
+$('clear').onclick=()=>{[...items].forEach(removeItem);};
+if(navigator.xr){
+  navigator.xr.isSessionSupported('immersive-vr').then(ok=>{$('vr').disabled=!ok;if(!ok)$('status').textContent='このブラウザはVR非対応です';}).catch(()=>{});
+  navigator.xr.isSessionSupported('immersive-ar').then(ok=>{arOK=ok;$('ar').disabled=!ok;}).catch(()=>{});
+}else $('status').textContent='WebXR非対応です（Quest ブラウザで開いてください）';
+const go=m=>()=>startXR(m).catch(err=>{$('status').textContent='没入モードを開始できませんでした';console.warn(err);});
+$('vr').onclick=go('vr'); $('ar').onclick=go('ar');
+})();
+</script>
+</body>
+</html>
