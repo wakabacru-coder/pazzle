@@ -37,25 +37,25 @@ b{color:var(--text)}
     <button id="vr" disabled>VRで表示</button>
     <button id="ar" disabled>パススルーで表示</button>
   </div>
-  <p>読み込み済み: <span id="count">0</span> 枚　<span id="status"></span></p>
+  <p>読み込み済み: <span id="count">0</span> 枚 <span id="status"></span></p>
   <div class="row"><button id="relayout">並べ直す</button><button id="clear">すべて削除</button></div>
   <p><b>コントローラー操作（没入中）</b></p>
   <ul>
     <li><b>トリガー長押し</b>：掴んで移動・回転</li>
     <li><b>掴み中のスティック</b>：上下＝遠近、左右＝拡大縮小</li>
+    <li><b>掴み中のスティック押し込み</b>：XYZ回転を最寄りの90°倍数（グリッド垂直）にスナップ</li>
+    <li><b>A / X ボタン</b>：コントローラーが手の平のデザインに変化</li>
     <li><b>素早くダブルタップ</b>：編集モード（色相・彩度・明るさ・コントラスト）</li>
     <li><b>動画をタップ</b>：再生／停止（下部にシークバーと音量）</li>
     <li><b>B / Y ボタン</b>：メニューの表示／非表示</li>
-    <li><b>A / X ボタン</b>：弧状に並べ直す</li>
   </ul>
-  <p>ファイル選択は没入中は開けないため、メニューのボタンで没入を終了してから選んでください。</p>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 (function(){
 const $ = id => document.getElementById(id);
-const PI = Math.PI, BGC = 0x0d1117, FRAME = 0x3a4350, HOVER = 0x4da3ff, GRAB = 0xffc94d, EDIT = 0xb36bff;
+const PI = Math.PI, BGC = 0x0d1117, FRAME = 0x3a4350, GRAB = 0xffc94d, EDIT = 0xb36bff;
 const FONT = '"Noto Sans JP","Hiragino Sans","Yu Gothic",sans-serif';
 const scene = new THREE.Scene(); scene.background = new THREE.Color(BGC);
 const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.05, 80);
@@ -236,13 +236,16 @@ function applyMode(){
   grid.visible=!ar; bgMesh.visible=!ar&&bgMode!=='none'&&!!bgTex; menu.dirty=true;
 }
 async function startXR(m){
-  const s=await navigator.xr.requestSession(m==='ar'?'immersive-ar':'immersive-vr',{optionalFeatures:['local-floor','bounded-floor']});
-  session=s; mode=m; renderer.xr.setSession(s); applyMode(); $('panel').style.display='none';
+  const opts = {
+    optionalFeatures: ['local-floor', 'bounded-floor', 'dom-overlay'],
+    domOverlay: { root: document.getElementById('panel') }
+  };
+  const s=await navigator.xr.requestSession(m==='ar'?'immersive-ar':'immersive-vr', opts);
+  session=s; mode=m; renderer.xr.setSession(s); applyMode();
   s.addEventListener('end',()=>{
     session=null; menu.group.visible=false; exitEdit(); applyMode();
     const p=pending; pending=null;
-    if(p) startXR(p).catch(()=>{$('panel').style.display='';mode=p;$('status').textContent='ボタンを押して '+(p==='ar'?'パススルー':'VR')+' に切り替えてください';});
-    else $('panel').style.display='';
+    if(p) startXR(p).catch(()=>{$('status').textContent='ボタンを押して '+(p==='ar'?'パススルー':'VR')+' に切り替えてください';});
   });
 }
 function endXR(msg){ if(msg) $('status').textContent=msg; pending=null; session&&session.end(); }
@@ -252,13 +255,13 @@ const bgBtn=(x,m,l)=>({t:'btn',x,y:262,w:160,h:64,label:l,on:()=>bgMode===m,act:
 const menu=makePanel(.9,.8,[
   {t:'txt',x:20,y:12,w:300,h:40,label:'メニュー',size:30},
   {t:'btn',x:20,y:70,w:245,h:64,label:'没入モード解除',act:()=>endXR()},
-  {t:'btn',x:275,y:70,w:245,h:64,label:'画像・動画選択',act:()=>endXR('画像・動画を選択してください')},
+  {t:'btn',x:275,y:70,w:245,h:64,label:'画像・動画選択',act:()=>{}}, // DOM Overlayにより没入中も選択可能に
   {t:'btn',x:20,y:150,w:500,h:64,label:()=>'パススルー：'+(mode==='ar'?'ON':'OFF'),on:()=>mode==='ar',act:()=>{
     if(!arOK&&mode!=='ar'){return;}
     pending=mode==='ar'?'vr':'ar'; session&&session.end();}},
   {t:'txt',x:20,y:226,w:400,h:30,label:'背景',size:24},
   bgBtn(20,'none','なし'),bgBtn(190,'360','360°'),bgBtn(360,'180','180°'),
-  {t:'btn',x:20,y:346,w:500,h:64,label:'背景ファイル選択',act:()=>endXR('背景の画像・動画を選択してください')},
+  {t:'btn',x:20,y:346,w:500,h:64,label:'背景ファイル選択',act:()=>$('bgfile').click()},
   {t:'txt',x:20,y:420,w:500,h:40,label:()=>'背景: '+(bgName||'未選択')+(mode==='ar'?'（パススルー中は非表示）':''),size:22}
 ]);
 menu.group.visible=false; scene.add(menu.group);
@@ -275,11 +278,24 @@ function toggleMenu(){
 const controllers=[], ray=new THREE.Raycaster(), tm=new THREE.Matrix4(), wp=new THREE.Vector3();
 let lastClick={item:null,t:0};
 const lineGeo=new THREE.CylinderGeometry(.004,.004,1,6); lineGeo.rotateX(PI/2); lineGeo.translate(0,0,-.5);
+
+// 手の平表現用のメッシュテンプレート
+const palmGeo = new THREE.CircleGeometry(0.035, 16);
+const palmMat = new THREE.MeshBasicMaterial({color: 0xffffff, transparent: true, opacity: 0.7, side: THREE.DoubleSide});
+
 for(let i=0;i<2;i++){
   const c=renderer.xr.getController(i);
   const line=new THREE.Mesh(lineGeo,new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:.35,depthWrite:false}));
   line.scale.z=5; c.add(line);
-  c.userData={hit:null,grab:null,drag:null,line,src:null,prev:[],t0:0,p0:new THREE.Vector3(),clickItem:null};
+
+  // 手の平パーツを追加
+  const palmMesh = new THREE.Mesh(palmGeo, palmMat);
+  palmMesh.position.set(0, 0, -0.04);
+  palmMesh.rotation.x = Math.PI / 2;
+  palmMesh.visible = false;
+  c.add(palmMesh);
+
+  c.userData={hit:null,grab:null,drag:null,line,palmMesh,src:null,prev:[],t0:0,p0:new THREE.Vector3(),clickItem:null};
   c.addEventListener('connected',e=>{c.userData.src=e.data;});
   c.addEventListener('disconnected',()=>{c.userData.src=null;});
   c.addEventListener('selectstart',()=>{
@@ -323,7 +339,6 @@ function drawIf(p,dt,live){
   p.acc+=dt; if(p.dirty||(live&&p.acc>.15)){p.draw();p.acc=0;}
 }
 function update(dt){
-  items.forEach(it=>it.frame.material.color.setHex(it===editItem?EDIT:FRAME));
   const picks=items.map(i=>i.mesh);
   items.forEach(i=>{if(i.vp)picks.push(i.vp.mesh);});
   if(menu.group.visible) picks.push(menu.mesh);
@@ -341,16 +356,31 @@ function update(dt){
         g.position.z=Math.min(-.2,g.position.z+sy*dt*2);
         g.scale.setScalar(Math.min(3,Math.max(.2,g.scale.x*(1+sx*dt))));
       }
+      // スティック押し込み（ボタン3）でXYZ回転を90°の倍数にスナップ
+      if(gp){
+        const dn3 = !!(gp.buttons[3] && gp.buttons[3].pressed);
+        if(dn3 && !u.prev[3]){
+          const r = g.rotation;
+          r.x = Math.round(r.x / (PI / 2)) * (PI / 2);
+          r.y = Math.round(r.y / (PI / 2)) * (PI / 2);
+          r.z = Math.round(r.z / (PI / 2)) * (PI / 2);
+        }
+        u.prev[3] = dn3;
+      }
       if(u.grab.frame) u.grab.frame.material.color.setHex(GRAB);
     }else{
       const h=castFrom(c,picks); u.hit=h; u.line.scale.z=h?h.distance:5;
-      const it=h&&h.object.userData.item; if(it) it.frame.material.color.setHex(HOVER);
     }
     if(gp){
       const dn=i=>!!(gp.buttons[i]&&gp.buttons[i].pressed);
-      if(dn(4)&&!u.prev[4]) layout();
+      
+      // A / X ボタン（ボタン4）で手の平デザインの表示切り替え
+      const isAPressed = dn(4);
+      u.palmMesh.visible = isAPressed;
+
+      // B / Y ボタン（ボタン5）でメニュー表示切替
       if(dn(5)&&!u.prev[5]&&renderer.xr.isPresenting) toggleMenu();
-      u.prev[4]=dn(4); u.prev[5]=dn(5);
+      u.prev[5]=dn(5);
     }
   });
   if(menu.group.visible) drawIf(menu,dt);
@@ -371,14 +401,21 @@ addEventListener('pointermove',e=>{
   lx=e.clientX; ly=e.clientY;
 });
 addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
-$('file').addEventListener('change',async e=>{
-  const files=[...e.target.files]; if(!files.length) return;
+
+// 共通のファイル読み込み処理
+async function handleFiles(files){
+  if(!files.length) return;
   $('status').textContent='読み込み中…'; let fail=0;
   for(const f of files){
     try{ f.type.startsWith('video')?await addVideo(f):await addImage(f); }catch(err){fail++;console.warn(err);}
   }
   layout(); updateCount();
-  $('status').textContent=fail?fail+' 件は読み込めませんでした':''; e.target.value='';
+  $('status').textContent=fail?fail+' 件は読み込めませんでした':'';
+}
+
+$('file').addEventListener('change',async e=>{
+  await handleFiles([...e.target.files]);
+  e.target.value='';
 });
 $('bgfile').addEventListener('change',async e=>{
   const f=e.target.files[0]; if(!f) return;
@@ -387,10 +424,12 @@ $('bgfile').addEventListener('change',async e=>{
 });
 $('relayout').onclick=layout;
 $('clear').onclick=()=>{[...items].forEach(removeItem);};
+
 if(navigator.xr){
-  navigator.xr.isSessionSupported('immersive-vr').then(ok=>{$('vr').disabled=!ok;if(!ok)$('status').textContent='このブラウザはVR非対応です';}).catch(()=>{});
+  navigator.xr.isSessionSupported('immersive-vr').then(ok=>{$('vr').disabled=!ok;if(!ok)$('status').textContent='This browser does not support VR';}).catch(()=>{});
   navigator.xr.isSessionSupported('immersive-ar').then(ok=>{arOK=ok;$('ar').disabled=!ok;}).catch(()=>{});
 }else $('status').textContent='WebXR非対応です（Quest ブラウザで開いてください）';
+
 const go=m=>()=>startXR(m).catch(err=>{$('status').textContent='没入モードを開始できませんでした';console.warn(err);});
 $('vr').onclick=go('vr'); $('ar').onclick=go('ar');
 })();
