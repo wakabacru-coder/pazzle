@@ -110,6 +110,7 @@ b{color:var(--text)}
       <li><b>ヘリ（辺の中央）</b>：掴んでコントローラーをひねると、その通りに360°回転（スティックで追加回転）</li>
       <li><b>ダブルクリック</b>：編集パネル（フィルター等）</li>
       <li><b>A / X</b>：プリセットパネル　<b>B / Y</b>：メニュー　<b>グリップ</b>：アニメ再生/停止</li>
+      <li><b>パネル</b>：開くと自動で整列／右上の × で閉じる／メニューの「パネル整列」で手元に集める</li>
       <li><b>スティック押し込み</b>：90°にスナップ</li>
     </ul>
   </details>
@@ -119,7 +120,7 @@ b{color:var(--text)}
 <script>
 (function(){
 const $ = id => document.getElementById(id);
-const PI = Math.PI, BGC = 0x0d1117, ROT_GAIN = 2.0;
+const PI = Math.PI, BGC = 0x0d1117, ROT_GAIN = 2.0, SPEED_BASE = 0.3;
 const FONT = '"Noto Sans JP","Hiragino Sans","Yu Gothic",sans-serif';
 const setStatus = t => { $('status').textContent = t || ''; };
 const scene = new THREE.Scene(); scene.background = new THREE.Color(BGC);
@@ -221,6 +222,7 @@ function applySlider(p,c,uv){
   c.set(v); p.dirty=true;
 }
 
+const closeBtn=p=>({t:'btn',x:p.W-50,y:6,w:44,h:34,label:'×',act:()=>{p.group.visible=false;}});
 function getCameraPositionAndDirection(posOut, dirOut){
   let m=camera.matrixWorld;
   if(renderer.xr.isPresenting){
@@ -495,7 +497,8 @@ const ep=makePanel(.85,.68,[
     if(editItem.animating){editItem.animating=false;editItem.group.position.copy(editItem.basePos);}
     editItem.animDepth=2.0;
   }},
-  {t:'btn',x:20,y:270,w:440,h:50,label:'シーンから外す',act:()=>{const it=editItem;exitEdit();removeItem(it);}}
+  {t:'btn',x:20,y:270,w:440,h:50,label:'シーンから外す',act:()=>{const it=editItem;exitEdit();removeItem(it);}},
+  {t:'btn',x:464,y:6,w:40,h:34,label:'×',act:()=>exitEdit()}
 ]);
 function enterEdit(it){
   exitEdit(); editItem=it; ep.owner=it; it.group.add(ep.group);
@@ -531,7 +534,7 @@ function buildPresetControls(){
   }else{
     c.push({t:'txt',x:20,y:140,w:500,h:35,label:'上のボタンでレイアウトを選んでください',size:22});
   }
-  presetMenu.controls=c; presetMenu.dirty=true;
+  c.push(closeBtn(presetMenu)); presetMenu.controls=c; presetMenu.dirty=true;
 }
 buildPresetControls();
 
@@ -555,24 +558,24 @@ function buildLibControls(){
     {t:'btn',x:442,y:478,w:130,h:48,label:'削除モード',on:()=>libDel,act:()=>{libDel=!libDel;buildLibControls();}},
     {t:'txt',x:16,y:534,w:560,h:36,label:()=>'ページ '+(libPage+1)+'/'+pages+' ・ 素材 '+library.length+' 点 ・ 表示中 '+items.length,size:22}
   );
-  libPanel.controls=c; libPanel.dirty=true;
+  c.push(closeBtn(libPanel)); libPanel.controls=c; libPanel.dirty=true;
 }
 
-function placeInFront(panel,dy,side,dist){
+// パネルを開くたびに、開いている全パネルを視界の前に弧状に自動整列（左:メニュー 中:ライブラリ 右:プリセット）
+function arrangePanels(){
+  const ps=[menu,libPanel,presetMenu].filter(p=>p.group.visible);
+  if(!ps.length) return;
   getCameraPositionAndDirection(v1,v2);
-  const g=panel.group;
-  scene.attach(g); g.scale.set(1,1,1);
-  g.position.copy(v1).addScaledVector(v2,dist).addScaledVector(v3.set(-v2.z,0,v2.x),side*.62);
-  g.position.y=v1.y+dy;
-  g.lookAt(v1.x,g.position.y,v1.z);
-  panel.dirty=true;
+  const base=Math.atan2(v2.x,-v2.z);
+  ps.forEach((p,k)=>{
+    const a=base+(k-(ps.length-1)/2)*.75, g=p.group;
+    scene.attach(g); g.scale.set(1,1,1);
+    g.position.set(v1.x+Math.sin(a)*1.35,v1.y-.05,v1.z-Math.cos(a)*1.35);
+    g.lookAt(v1.x,g.position.y,v1.z); p.dirty=true;
+  });
 }
-function togglePanel(panel,dy,side,dist){
-  panel.group.visible=!panel.group.visible;
-  if(panel.group.visible) placeInFront(panel,dy,side,dist);
-}
-const togglePresetPanel=()=>togglePanel(presetMenu,0,1,1.1);
-const toggleLibrary=()=>togglePanel(libPanel,0,0,1.4);
+function togglePanel(p){ p.group.visible=!p.group.visible; if(p.group.visible) arrangePanels(); }
+const togglePresetPanel=()=>togglePanel(presetMenu), toggleLibrary=()=>togglePanel(libPanel);
 
 // ---- 背景（360° / 180° SBS ステレオ） ----
 let bgMode='none', bgTex=null, bgVideo=null, bgUrl=null, bgName='';
@@ -637,7 +640,7 @@ function endXR(){ pending=null; session&&session.end(); }
 
 // ---- メインメニュー ----
 const bgBtn=(x,m,l)=>({t:'btn',x,y:262,w:160,h:64,label:l,on:()=>bgMode===m,act:()=>setBgMode(m)});
-const menu=makePanel(.9,.7,[
+const menu=makePanel(.9,.82,[
   {t:'txt',x:20,y:12,w:300,h:40,label:'メニュー',size:30},
   {t:'btn',x:20,y:70,w:245,h:64,label:'没入モード解除',act:()=>endXR()},
   {t:'btn',x:275,y:70,w:245,h:64,label:'ライブラリ',act:()=>toggleLibrary()},
@@ -646,10 +649,13 @@ const menu=makePanel(.9,.7,[
     pending=mode==='ar'?'vr':'ar'; session&&session.end();}},
   {t:'txt',x:20,y:226,w:400,h:30,label:'背景',size:24},
   bgBtn(20,'none','なし'),bgBtn(190,'360','360°'),bgBtn(360,'180','180°(SBS)'),
-  {t:'txt',x:20,y:346,w:500,h:40,label:()=>'背景: '+(bgName||'未選択')+(mode==='ar'?'（パススルー中は非表示）':''),size:22}
+  {t:'txt',x:20,y:346,w:500,h:40,label:()=>'背景: '+(bgName||'未選択')+(mode==='ar'?'（パススルー中は非表示）':''),size:22},
+  {t:'btn',x:20,y:398,w:245,h:64,label:'パネル整列',act:()=>arrangePanels()},
+  {t:'btn',x:275,y:398,w:245,h:64,label:'すべて閉じる',act:()=>{menu.group.visible=presetMenu.group.visible=libPanel.group.visible=false;exitEdit();}}
 ]);
+menu.controls.push(closeBtn(menu));
 menu.group.visible=false; scene.add(menu.group);
-const toggleMenu=()=>togglePanel(menu,-.05,-1,1.1);
+const toggleMenu=()=>togglePanel(menu);
 
 // ---- コントローラー制御 ----
 const controllers=[], ray=new THREE.Raycaster(), tm=new THREE.Matrix4(), wp=new THREE.Vector3();
@@ -849,12 +855,12 @@ function update(dt){
   items.forEach(i=>{
     const free=i.group.parent===scene&&!i.activeHandle;
     if(i.animating&&free){
-      i.animTime+=dt*(i.animSpeed||1);
+      i.animTime+=dt*SPEED_BASE*(i.animSpeed||1);
       const d=(Math.sin(i.animTime*2-PI/2)+1)*.5*i.animDepth;
       i.group.position.copy(i.basePos).addScaledVector(i.animDir,d);
     }else if(i.orbitAnimating&&free){
       // 位置を円周上で進めつつ向きも同じだけ回す（ユーザーが回した姿勢を保つ）
-      const da=dt*.5*(i.orbitSpeed||1); i.orbitAngle+=da;
+      const da=dt*.5*SPEED_BASE*(i.orbitSpeed||1); i.orbitAngle+=da;
       i.group.quaternion.premultiply(_qa.setFromAxisAngle(YAX,-da));
       const R=i.orbitRadius||2.5;
       i.group.position.set(R*Math.sin(i.orbitAngle),i.orbitY,-R*Math.cos(i.orbitAngle));
