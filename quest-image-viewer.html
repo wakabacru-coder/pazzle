@@ -41,11 +41,13 @@ b{color:var(--text)}
   <div class="row"><button id="relayout">並べ直す</button><button id="clear">すべて削除</button></div>
   <p><b>コントローラー操作（没入中）</b></p>
   <ul>
-    <li><b>トリガー長押し</b>：ダイレクトに掴んで移動（慣性なし）</li>
+    <li><b>トリガー長押し</b>：ダイレクトに掴んで移動</li>
+    <li><b>素早くダブルタップ</b>：編集モードの表示／閉じる</li>
     <li><b>中指トリガー（グリップ）</b>：ホバー中の画像のアニメーションON/OFF</li>
-    <li><b>カド操作</b>：掴むと対角のカドを固定したままカーソル移動やスティックでリサイズ</li>
-    <li><b>ヘリ操作</b>：掴むと中心軸で回転（カーソル移動＆スティック対応）</li>
-    <li><b>カーソルホバー＋スティック押し込み</b>：XYZ回転を90°にスナップ</li>
+    <li><b>カド操作</b>：直感的に引き伸ばしてリサイズ（対角固定）</li>
+    <li><b>ヘリ操作</b>：掴んで回すと中心軸でスムーズ回転</li>
+    <li><b>官能的なフィルター</b>：編集モードで掛かり具合をスライダー調整</li>
+    <li><b>180°背景SBS対応</b>：立体（サイドバイサイド）画像を正しく表示</li>
     <li><b>A / X ボタン</b>：手の平デザイン表示</li>
     <li><b>B / Y ボタン</b>：メニュー表示／非表示</li>
   </ul>
@@ -68,18 +70,57 @@ renderer.xr.setReferenceSpaceType('local-floor');
 document.body.prepend(renderer.domElement);
 const grid = new THREE.GridHelper(12,24,0x30363d,0x1c2128); scene.add(grid);
 
-// ---- 色調整シェーダー ----
+// ---- 官能的なフィルター用シェーダー (Sensual Filter Shader) ----
 const VS = 'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}';
-const FS = `uniform sampler2D map;uniform float hue,sat,bri,con;varying vec2 vUv;
-void main(){vec3 c=texture2D(map,vUv).rgb;
-mat3 a=mat3(.299,.596,.211,.587,-.274,-.523,.114,-.322,.312);
-mat3 b=mat3(1.,1.,1.,.956,-.272,-1.106,.621,-.647,1.703);
-vec3 y=a*c;float cs=cos(hue),sn=sin(hue);y=vec3(y.x,y.y*cs-y.z*sn,y.y*sn+y.z*cs);c=b*y;
-float l=dot(c,vec3(.299,.587,.114));c=mix(vec3(l),c,sat);c=(c-.5)*con+.5+bri;
-gl_FragColor=vec4(clamp(c,0.,1.),1.);}`;
+const FS = `
+uniform sampler2D map;
+uniform float filterIntensity; // 官能的フィルターのかかり具合 (0.0 ~ 1.0)
+varying vec2 vUv;
+
+void main(){
+  vec4 texColor = texture2D(map, vUv);
+  vec3 rgb = texColor.rgb;
+
+  // 官能的（暖かみ・情熱的な赤み・深み・ソフトなコントラスト）なグラデーション変換
+  vec3 warmTinge = vec3(
+    pow(rgb.r, 0.88) * 1.08 + 0.03,
+    pow(rgb.g, 0.95) * 0.98,
+    pow(rgb.b, 1.05) * 0.92
+  );
+
+  // コントラスト調整とシャドウへのワインレッド（深み）加減
+  float lum = dot(warmTinge, vec3(0.299, 0.587, 0.114));
+  vec3 sensual = mix(warmTinge, vec3(lum * 1.1, lum * 0.9, lum * 0.95), -0.15);
+  sensual += vec3(0.04, 0.01, 0.02) * (1.0 - lum); // 影部分の温かなグラデーション
+
+  // オリジナル画像とフィルター画像のブレンディング
+  vec3 finalColor = mix(rgb, clamp(sensual, 0.0, 1.0), filterIntensity);
+  gl_FragColor = vec4(finalColor, texColor.a);
+}`;
+
+// ---- SBS 180°背景用シェーダー (Left / Right Eye Stereo) ----
+const BG_VS = 'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}';
+const BG_FS = `
+uniform sampler2D map;
+uniform float isStereo180;
+varying vec2 vUv;
+
+void main(){
+  vec2 uv = vUv;
+  if(isStereo180 > 0.5){
+    // レンダリング中の視点（左目/右目）に応じてテクスチャの左右半分を切換
+    #ifdef THREE_VR
+      if(cameraIndex == 0){ uv.x = uv.x * 0.5; }        // 左目
+      else { uv.x = uv.x * 0.5 + 0.5; }                // 右目
+    #else
+      uv.x = uv.x * 0.5; // デフォルト 2D表示用
+    #endif
+  }
+  gl_FragColor = texture2D(map, uv);
+}`;
 
 // ---- パネル（キャンバスUI） ----
-function rr(c,x,y,w,h,r){c.beginPath();c.moveTo(x+r,y);c.arcTo(x+w,y,x+w,y+h,r);c.arcTo(x+w,y+h,x,y+h,r);c.arcTo(x,y,x+w,y,r);c.closePath();}
+function rr(c,x,y,w,h,r){c.beginPath();c.moveTo(x+r,y);c.arcTo(x+w,y,x+w,y+h,r);c.arcTo(x+w,y+h,x,y+h,r);c.arcTo(x,y+h,x,y,r);c.closePath();}
 function makePanel(wm,hm,controls){
   const S=600, W=Math.round(wm*S), H=Math.round(hm*S);
   const cv=document.createElement('canvas'); cv.width=W; cv.height=H;
@@ -118,17 +159,13 @@ function applySlider(p,c,uv){
   c.set(v); p.dirty=true;
 }
 
-// ---- ヘリ・カドハンドル（通常は透過グレー、ホバー・掴み時は白） ----
+// ---- ヘリ・カドハンドル（安定化＆見た目改善） ----
 const MAT_HANDLE_DEFAULT = new THREE.MeshBasicMaterial({color: 0x888888, transparent: true, opacity: 0.4, side: THREE.DoubleSide});
 const MAT_HANDLE_HOVER   = new THREE.MeshBasicMaterial({color: 0xffffff, transparent: true, opacity: 0.8, side: THREE.DoubleSide});
 const MAT_HANDLE_ACTIVE  = new THREE.MeshBasicMaterial({color: 0xffffff, transparent: true, opacity: 0.9, side: THREE.DoubleSide});
 
-// カドの対角ペアテーブル
 const OPPOSITE_CORNER = {
-  'bl': 'tr',
-  'br': 'tl',
-  'tr': 'bl',
-  'tl': 'br'
+  'bl': 'tr', 'br': 'tl', 'tr': 'bl', 'tl': 'br'
 };
 
 function makeHandles(it){
@@ -186,7 +223,6 @@ function updateHandleVisibility(it, activeHandleObj = null){
   });
 }
 
-// カドのローカル相対オフセット取得
 function getCornerLocalPos(cornerName, w, h){
   const margin = 0.025;
   const sx = (cornerName === 'tr' || cornerName === 'br') ? 1 : -1;
@@ -199,7 +235,13 @@ const items=[]; let editItem=null;
 const speedOptions = [0.5, 1, 2, 3, 5];
 
 function makeItem(tex,w,h,video){
-  const mat=new THREE.ShaderMaterial({uniforms:{map:{value:tex},hue:{value:0},sat:{value:1},bri:{value:0},con:{value:1}},vertexShader:VS,fragmentShader:FS,side:THREE.DoubleSide});
+  const mat=new THREE.ShaderMaterial({
+    uniforms:{
+      map:{value:tex},
+      filterIntensity:{value:0.0} // 官能的フィルター初期値0 (0.0 ~ 1.0)
+    },
+    vertexShader:VS, fragmentShader:FS, side:THREE.DoubleSide
+  });
   const group=new THREE.Group();
   const mesh=new THREE.Mesh(new THREE.PlaneGeometry(w,h),mat);
   group.add(mesh); scene.add(group);
@@ -271,29 +313,26 @@ function layout(){
 }
 function updateCount(){ $('count').textContent=items.length; }
 
-// ---- 編集パネル ----
+// ---- 編集パネル（閉じるボタン削除・官能的フィルターのみ設置） ----
 const snapSld=(y,label,get,set)=>({t:'sld',x:20,y,w:440,h:65,label,snap:true,get,set});
-const ep=makePanel(.85,.85,[
-  snapSld(10,'色相',()=>editItem?editItem.u.hue.value/(2*PI)+.5:.5,v=>{editItem.u.hue.value=(v-.5)*2*PI;}),
-  snapSld(80,'彩度',()=>editItem?editItem.u.sat.value/2:.5,v=>{editItem.u.sat.value=v*2;}),
-  snapSld(150,'明るさ',()=>editItem?editItem.u.bri.value+.5:.5,v=>{editItem.u.bri.value=v-.5;}),
-  snapSld(220,'コントラスト',()=>editItem?editItem.u.con.value-.5:.5,v=>{editItem.u.con.value=v+.5;}),
+const ep=makePanel(.85,.68,[
+  // 官能的フィルターのかかり具合スライダー
+  snapSld(20,'官能フィルター',()=>editItem?editItem.u.filterIntensity.value:0,v=>{if(editItem)editItem.u.filterIntensity.value=v;}),
 
-  {t:'sld',x:20,y:295,w:280,h:60,label:()=>'アニメ奥行き: '+(editItem?(editItem.animDepth).toFixed(2)+'m':''),get:()=>editItem?editItem.animDepth/2.0:0.25,set:v=>{if(editItem)editItem.animDepth=v*2.0;}},
+  {t:'sld',x:20,y:110,w:280,h:60,label:()=>'アニメ奥行き: '+(editItem?(editItem.animDepth).toFixed(2)+'m':''),get:()=>editItem?editItem.animDepth/2.0:0.25,set:v=>{if(editItem)editItem.animDepth=v*2.0;}},
 
-  {t:'btn',x:315,y:295,w:145,h:55,label:()=>'速度: '+(editItem?speedOptions[editItem.animSpeedIdx]:1)+'x',act:()=>{
+  {t:'btn',x:315,y:110,w:145,h:55,label:()=>'速度: '+(editItem?speedOptions[editItem.animSpeedIdx]:1)+'x',act:()=>{
     if(!editItem) return;
     editItem.animSpeedIdx = (editItem.animSpeedIdx + 1) % speedOptions.length;
   }},
 
-  {t:'btn',x:20,y:370,w:210,h:55,label:'リセット',act:()=>{
+  {t:'btn',x:20,y:195,w:440,h:55,label:'フィルターリセット',act:()=>{
     if(!editItem)return;
-    const u=editItem.u; u.hue.value=0; u.sat.value=1; u.bri.value=0; u.con.value=1;
+    editItem.u.filterIntensity.value = 0;
     if(editItem.animating){ editItem.animating=false; editItem.group.position.copy(editItem.basePos); }
     editItem.animDepth=0.5; editItem.animSpeedIdx=1;
   }},
-  {t:'btn',x:250,y:370,w:210,h:55,label:'閉じる',act:()=>exitEdit()},
-  {t:'btn',x:20,y:435,w:440,h:50,label:'削除',act:()=>{const it=editItem;exitEdit();removeItem(it);}}
+  {t:'btn',x:20,y:270,w:440,h:50,label:'画像を削除',act:()=>{const it=editItem;exitEdit();removeItem(it);}}
 ]);
 
 function enterEdit(it){
@@ -302,15 +341,24 @@ function enterEdit(it){
 }
 function exitEdit(){ if(editItem) editItem.group.remove(ep.group); editItem=null; }
 
-// ---- 背景（360°/180°） ----
+// ---- 背景（360°/180° SBS対応） ----
 let bgMode='none', bgTex=null, bgVideo=null, bgName='';
-const bgMesh=new THREE.Mesh(new THREE.BufferGeometry(),new THREE.MeshBasicMaterial());
+const bgMat = new THREE.ShaderMaterial({
+  uniforms: { map: { value: null }, isStereo180: { value: 0.0 } },
+  vertexShader: BG_VS, fragmentShader: BG_FS, side: THREE.DoubleSide
+});
+const bgMesh=new THREE.Mesh(new THREE.BufferGeometry(), bgMat);
 bgMesh.position.y=1.6; bgMesh.renderOrder=-1; bgMesh.frustumCulled=false; bgMesh.visible=false; scene.add(bgMesh);
+
 function setBgMode(m){
   bgMode=m; bgMesh.geometry.dispose();
-  const g=m==='180'?new THREE.SphereGeometry(30,64,32,PI,PI):new THREE.SphereGeometry(30,64,32);
-  g.scale(-1,1,1); bgMesh.geometry=g; applyMode(); menu.dirty=true;
+  const is180 = (m === '180');
+  const g = is180 ? new THREE.SphereGeometry(30,64,32,PI,PI) : new THREE.SphereGeometry(30,64,32);
+  g.scale(-1,1,1); bgMesh.geometry=g;
+  bgMat.uniforms.isStereo180.value = is180 ? 1.0 : 0.0;
+  applyMode(); menu.dirty=true;
 }
+
 async function loadBg(file){
   if(bgTex) bgTex.dispose();
   if(bgVideo){bgVideo.pause();bgVideo=null;}
@@ -324,7 +372,8 @@ async function loadBg(file){
     c.getContext('2d').drawImage(bmp,0,0,c.width,c.height); if(bmp.close) bmp.close();
     bgTex=new THREE.CanvasTexture(c);
   }
-  bgMesh.material.map=bgTex; bgMesh.material.needsUpdate=true; bgName=file.name;
+  bgMat.uniforms.map.value = bgTex;
+  bgMat.needsUpdate=true; bgName=file.name;
   setBgMode(bgMode==='none'?'360':bgMode);
 }
 
@@ -360,7 +409,7 @@ const menu=makePanel(.9,.8,[
     if(!arOK&&mode!=='ar'){return;}
     pending=mode==='ar'?'vr':'ar'; session&&session.end();}},
   {t:'txt',x:20,y:226,w:400,h:30,label:'背景',size:24},
-  bgBtn(20,'none','なし'),bgBtn(190,'360','360°'),bgBtn(360,'180','180°'),
+  bgBtn(20,'none','なし'),bgBtn(190,'360','360°'),bgBtn(360,'180','180°(SBS)'),
   {t:'btn',x:20,y:346,w:500,h:64,label:'背景ファイル選択',act:()=>$('bgfile').click()},
   {t:'txt',x:20,y:420,w:500,h:40,label:()=>'背景: '+(bgName||'未選択')+(mode==='ar'?'（パススルー中は非表示）':''),size:22}
 ]);
@@ -374,7 +423,7 @@ function toggleMenu(){
   m.lookAt(v1.x,m.position.y,v1.z); menu.dirty=true;
 }
 
-// ---- コントローラー & 操作処理 ----
+// ---- コントローラー & リサイズ操作安定化処理 ----
 const controllers=[], ray=new THREE.Raycaster(), tm=new THREE.Matrix4(), wp=new THREE.Vector3();
 let lastClick={item:null,t:0};
 const lineGeo=new THREE.CylinderGeometry(.004,.004,1,6); lineGeo.rotateX(PI/2); lineGeo.translate(0,0,-.5);
@@ -397,9 +446,9 @@ for(let i=0;i<2;i++){
     hit:null, grab:null, grabType:null, handleObj:null, drag:null, line, palmMesh, src:null, prev:[], t0:0,
     p0:new THREE.Vector3(),
     lastCtrlPos: new THREE.Vector3(),
-    // 対角アンカーリサイズ用状態保存
+    // 安定リサイズ用の固定初期パラメータ
+    initialW: 0.7, initialH: 0.7, initialDist: 1.0,
     oppositeWorldPos: new THREE.Vector3(),
-    initialAspect: 1.0,
     clickItem:null
   };
 
@@ -428,12 +477,16 @@ for(let i=0;i<2;i++){
       updateHandleVisibility(it, h.object);
 
       if(handleType === 'corner'){
-        // カド掴み時：対角カドの空間ワールド座標をアンカーとして記憶
+        // 初期サイズと対角アンカーの絶対保存
+        u.initialW = it.w;
+        u.initialH = it.h;
         const grabbedCorner = h.object.userData.corner;
         const oppCornerName = OPPOSITE_CORNER[grabbedCorner];
         const localOpp = getCornerLocalPos(oppCornerName, it.w, it.h);
         u.oppositeWorldPos.copy(localOpp).applyMatrix4(it.group.matrixWorld);
-        u.initialAspect = it.w / it.h;
+
+        const curPos = new THREE.Vector3(); c.getWorldPosition(curPos);
+        u.initialDist = Math.max(0.01, curPos.distanceTo(u.oppositeWorldPos));
       }
       return;
     }
@@ -445,8 +498,6 @@ for(let i=0;i<2;i++){
       u.clickItem = it;
       u.t0 = performance.now();
       c.getWorldPosition(u.p0);
-
-      // ダイレクトにコントローラーへアタッチ（慣性なし）
       c.attach(it.group);
     }
   });
@@ -471,11 +522,22 @@ for(let i=0;i<2;i++){
   scene.add(c); controllers.push(c);
 }
 
+// ダブルクリックで編集モードを開く／閉じる
 function onClick(it){
   const now=performance.now(), dbl=lastClick.item===it&&now-lastClick.t<450;
   if(it.video){toggle(it.video);it.vp.dirty=true;}
-  if(dbl){lastClick={item:null,t:0}; if(it.video) toggle(it.video); enterEdit(it);}
-  else lastClick={item:it,t:now};
+  if(dbl){
+    lastClick={item:null,t:0};
+    if(it.video) toggle(it.video);
+    // 既に編集中の場合は閉じ、そうでなければ開く
+    if(editItem === it){
+      exitEdit();
+    } else {
+      enterEdit(it);
+    }
+  } else {
+    lastClick={item:it,t:now};
+  }
 }
 
 function castFrom(c,objs){
@@ -522,7 +584,6 @@ function update(dt){
       const sy = gp ? dz(gp.axes[3]) : 0;
 
       if(u.grabType === 'item'){
-        // ダイレクトなオブジェクト操作（慣性なし）
         if(gp&&gp.axes.length>=4){
           g.position.z = Math.min(-.2, g.position.z + sy * dt * 2);
           const currentScale = g.scale.x;
@@ -530,69 +591,40 @@ function update(dt){
           g.scale.setScalar(newScale);
         }
       }else if(u.grabType === 'corner'){
-        // カド掴み：対角のカド位置を空間に固定しながらカーソル位置/スティックでリサイズ
+        // カド掴み：安定した対角アンカーリサイズ計算
         const grabbedCorner = u.handleObj.userData.corner;
-        const oppCornerName = OPPOSITE_CORNER[grabbedCorner];
-
-        // 掴んでいるカドの目標ワールド位置をレイキャスティングまたはカーソル位置から算出
-        const h = castFrom(c, [it.mesh]);
-        let targetCornerWorldPos = new THREE.Vector3();
-        if(h){
-          targetCornerWorldPos.copy(h.point);
-        } else {
-          targetCornerWorldPos.copy(curCtrlPos);
-        }
-
-        // スティック操作も加算
+        const currentDist = Math.max(0.01, curCtrlPos.distanceTo(u.oppositeWorldPos));
+        
+        // スティック操作による補正
+        let scaleFactor = currentDist / u.initialDist;
         if(Math.abs(sx) > 0.01){
-          const objRight = new THREE.Vector3(1,0,0).applyQuaternion(g.quaternion);
-          targetCornerWorldPos.addScaledVector(objRight, sx * dt);
+          scaleFactor *= (1 + sx * dt);
         }
 
-        // 対角カドアンカーから目標カドへのベクトルをオブジェクトのローカル空間に変換
-        const invQuat = g.quaternion.clone().invert();
-        const localVec = targetCornerWorldPos.clone().sub(u.oppositeWorldPos).applyQuaternion(invQuat);
-
-        // 新しい幅と高さを計算（対角からの相対距離）
-        let newW = Math.max(0.15, Math.abs(localVec.x));
-        let newH = Math.max(0.15, Math.abs(localVec.y));
-
-        // アスペクト比を維持して適用
-        if(u.initialAspect){
-          if(newW / newH > u.initialAspect){
-            newH = newW / u.initialAspect;
-          } else {
-            newW = newH * u.initialAspect;
-          }
-        }
+        const newW = Math.max(0.15, u.initialW * scaleFactor);
+        const newH = Math.max(0.15, u.initialH * scaleFactor);
 
         it.w = newW;
         it.h = newH;
 
-        // 対角カドの空間位置が絶対固定されるよう、中心位置（g.position）を再計算
+        // 対角カドの絶対固定
         const signX = (grabbedCorner === 'tr' || grabbedCorner === 'br') ? 1 : -1;
         const signY = (grabbedCorner === 'tr' || grabbedCorner === 'tl') ? 1 : -1;
-        const oppSignX = -signX;
-        const oppSignY = -signY;
-
         const margin = 0.025;
-        const localOppOffset = new THREE.Vector3(oppSignX * (newW/2 + margin), oppSignY * (newH/2 + margin), 0);
+        const localOppOffset = new THREE.Vector3(-signX * (newW/2 + margin), -signY * (newH/2 + margin), 0);
         const worldOppOffset = localOppOffset.applyQuaternion(g.quaternion);
 
         g.position.copy(u.oppositeWorldPos).sub(worldOppOffset);
 
-        // メッシュとハンドル更新
         it.mesh.geometry.dispose();
         it.mesh.geometry = new THREE.PlaneGeometry(it.w, it.h);
         makeHandles(it);
         updateHandleVisibility(it, u.handleObj);
 
       }else if(u.grabType === 'heli'){
-        // ヘリ掴み：コントローラーのカーソル移動（物理移動）またはスティック上下で回転
+        // ヘリ掴み：直感的な中心軸回転
         const side = u.handleObj.userData.side;
-        
-        // コントローラーの移動量をローカル回転へ変換
-        const deltaRot = (ctrlDelta.x + ctrlDelta.y) * 3.0 + sy * dt * 2;
+        const deltaRot = (ctrlDelta.x + ctrlDelta.y) * 2.5 + sy * dt * 2;
         if(Math.abs(deltaRot) > 0.0001){
           if(side === 'top' || side === 'bottom'){
             g.rotation.x += deltaRot;
@@ -604,7 +636,6 @@ function update(dt){
     }else{
       const h=castFrom(c,picks); u.hit=h; u.line.scale.z=h?h.distance:5;
 
-      // ホバー中のヘリ・カドを白く光らせる、他は透過グレー
       items.forEach(item => {
         if(item.allHandles){
           item.allHandles.forEach(handle => {
@@ -621,7 +652,7 @@ function update(dt){
     if(gp){
       const dn=i=>!!(gp.buttons[i]&&gp.buttons[i].pressed);
 
-      // 中指トリガー（グリップボタン = buttons[1]）でアニメーションON/OFF切り替え
+      // 中指トリガー（グリップボタン）でアニメーションON/OFF
       const dn1 = dn(1);
       if(dn1 && !u.prev[1] && u.hit){
         const it = u.hit.object.userData.item;
@@ -630,7 +661,6 @@ function update(dt){
           if(it.animating){
             it.basePos.copy(it.group.position);
             
-            // 頭部（視線/顔の向き）の前後方向ベクトルを取得し、90°の倍数にスナップ
             const headCam = renderer.xr.getCamera(camera);
             const rawDir = new THREE.Vector3();
             headCam.getWorldDirection(rawDir);
@@ -648,7 +678,7 @@ function update(dt){
       }
       u.prev[1] = dn1;
 
-      // ホバー＋スティック押し込み（buttons[3]）でXYZ回転を90°にスナップ
+      // ホバー＋スティック押し込みで回転を90°倍数にスナップ
       const dn3 = dn(3);
       if(dn3 && !u.prev[3] && u.hit){
         const it = u.hit.object.userData.item;
@@ -661,16 +691,16 @@ function update(dt){
       }
       u.prev[3] = dn3;
 
-      // A / X ボタン（buttons[4]）で手の平デザイン表示
+      // A / X ボタンで手の平デザイン表示
       u.palmMesh.visible = dn(4);
 
-      // B / Y ボタン（buttons[5]）でメニュー表示切替
+      // B / Y ボタンでメニュー表示切替
       if(dn(5)&&!u.prev[5]&&renderer.xr.isPresenting) toggleMenu();
       u.prev[5]=dn(5);
     }
   });
 
-  // アニメーション更新（慣性なしの直接更新）
+  // アニメーション更新
   items.forEach(i=>{
     if(i.animating){
       const spd = speedOptions[i.animSpeedIdx];
